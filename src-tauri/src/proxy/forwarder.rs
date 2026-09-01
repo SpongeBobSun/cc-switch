@@ -2383,7 +2383,8 @@ impl RequestForwarder {
                 response = self
                     .validate_codex_anthropic_success_response(response)
                     .await?;
-            } else if matches!(
+            }
+            if matches!(
                 resolved_claude_api_format.as_deref(),
                 Some("openai_responses")
             ) {
@@ -2398,10 +2399,13 @@ impl RequestForwarder {
                     // A response.failed/error before output remains failover-safe.
                     response = self.validate_responses_stream_start(response).await?;
                 }
-            } else if self.max_attempts > 1 {
+            }
+            if self.max_attempts > 1 {
                 // Other provider paths are commonly OpenAI/Anthropic-compatible relays.
                 // They may return a semantic error envelope with HTTP 200; inspect it
-                // before recording this attempt as a provider success.
+                // after any protocol-specific validation and before recording this attempt
+                // as a provider success. Keeping this as a second layer also covers custom
+                // business codes on the specialized Codex/Responses paths.
                 response = if request_is_streaming {
                     semantic_error::validate_stream_start(
                         response,

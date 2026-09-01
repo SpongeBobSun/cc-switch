@@ -1,0 +1,105 @@
+name: Build Windows (unsigned)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows x64 unsigned build
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Setup pnpm
+        shell: pwsh
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          node --version
+          pnpm --version
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: windows-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: windows-pnpm-store-
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: windows-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned Tauri app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The repository config enables updater artifacts for signed releases.
+          # Disable that output for this unsigned CI build so no signing secret is needed.
+          $unsignedConfig = '{"bundle":{"createUpdaterArtifacts":false}}'
+          pnpm tauri build --ci --config $unsignedConfig --bundles msi
+
+      - name: Collect Windows artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactDir = 'windows-artifacts'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          $msi = Get-ChildItem -Path 'src-tauri/target/release/bundle' -Recurse -Filter '*.msi' |
+            Select-Object -First 1
+          if ($null -eq $msi) {
+            throw 'No Windows MSI installer was produced'
+          }
+          Copy-Item $msi.FullName (Join-Path $artifactDir $msi.Name)
+
+          $exe = 'src-tauri/target/release/cc-switch.exe'
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "Portable executable was not produced: $exe"
+          }
+          Copy-Item $exe (Join-Path $artifactDir 'CC-Switch-Windows-x64.exe')
+
+          Get-ChildItem -Path $artifactDir | Format-Table Name, Length
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-switch-windows-unsigned-${{ github.sha }}
+          path: windows-artifacts/*
+          if-no-files-found: error
+          retention-days: 14

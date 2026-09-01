@@ -183,7 +183,8 @@ pub(crate) async fn validate_stream_start(
             // Unknown non-SSE payloads retain the old first-chunk behavior. JSON-looking
             // partial documents stay buffered so a split error envelope can be detected.
             if !matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'[')) {
-                let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                let replay =
+                    futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
                 return Ok(ProxyResponse::streamed(status, headers, replay));
             }
         }
@@ -390,8 +391,10 @@ mod tests {
     #[test]
     fn recognizes_common_error_envelopes() {
         assert_eq!(
-            json_error_message(br#"{"error":{"code":"insufficient_quota","message":"balance exhausted"}}"#)
-                .as_deref(),
+            json_error_message(
+                br#"{"error":{"code":"insufficient_quota","message":"balance exhausted"}}"#,
+            )
+            .as_deref(),
             Some("insufficient_quota: balance exhausted")
         );
         assert_eq!(

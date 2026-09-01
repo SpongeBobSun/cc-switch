@@ -263,6 +263,14 @@ fn value_error_message(value: &Value) -> Option<String> {
         {
             return Some(format_object_message(data, "upstream reported failure"));
         }
+        for key in ["code", "error_code", "errorCode"] {
+            let Some(code) = data.get(key) else {
+                continue;
+            };
+            if !is_success_code(code) && has_message_field(data) {
+                return Some(format_object_message(data, "upstream business error"));
+            }
+        }
     }
 
     None
@@ -347,7 +355,12 @@ fn field_label(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option
 fn has_message_field(object: &serde_json::Map<String, Value>) -> bool {
     ["message", "msg", "detail", "error_description"]
         .iter()
-        .any(|key| object.get(*key).and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()))
+        .any(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+        })
 }
 
 fn is_success_code(code: &Value) -> bool {
@@ -404,6 +417,11 @@ mod tests {
         );
         assert!(json_error_message(br#"{"code":200,"msg":"ok","data":{}}"#).is_none());
         assert!(json_error_message(br#"{"message":"normal metadata","data":{}}"#).is_none());
+        assert_eq!(
+            json_error_message(br#"{"data":{"code":1006,"msg":"balance exhausted"}}"#)
+                .as_deref(),
+            Some("1006: balance exhausted")
+        );
     }
 
     #[test]

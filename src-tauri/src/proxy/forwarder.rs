@@ -2375,10 +2375,8 @@ impl RequestForwarder {
             let mut response = self
                 .prepare_success_response_for_failover(response, request_is_streaming)
                 .await?;
-            // Streaming requests normally return SSE. If a compatible gateway
-            // explicitly returns JSON instead, buffer and validate it inside the retry
-            // loop as well so a 2xx Anthropic error envelope can still fail over. Do
-            // not buffer unknown content types: some gateways omit the SSE header.
+            // Run protocol-specific checks first. The generic semantic check below is
+            // layered on top so custom gateway business codes are covered as well.
             if codex_responses_to_anthropic && (!request_is_streaming || response.is_json()) {
                 response = self
                     .validate_codex_anthropic_success_response(response)
@@ -2406,7 +2404,7 @@ impl RequestForwarder {
                 // after any protocol-specific validation and before recording this attempt
                 // as a provider success. Keeping this as a second layer also covers custom
                 // business codes on the specialized Codex/Responses paths.
-                response = if request_is_streaming {
+                response = if request_is_streaming && !response.is_json() {
                     semantic_error::validate_stream_start(
                         response,
                         self.streaming_first_byte_timeout,

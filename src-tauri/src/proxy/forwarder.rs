@@ -15,6 +15,7 @@ use super::{
         codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore, get_adapter,
         AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
     },
+    semantic_error,
     thinking_budget_rectifier::{rectify_thinking_budget, should_rectify_thinking_budget},
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
@@ -2397,6 +2398,19 @@ impl RequestForwarder {
                     // A response.failed/error before output remains failover-safe.
                     response = self.validate_responses_stream_start(response).await?;
                 }
+            } else if self.max_attempts > 1 {
+                // Other provider paths are commonly OpenAI/Anthropic-compatible relays.
+                // They may return a semantic error envelope with HTTP 200; inspect it
+                // before recording this attempt as a provider success.
+                response = if request_is_streaming {
+                    semantic_error::validate_stream_start(
+                        response,
+                        self.streaming_first_byte_timeout,
+                    )
+                    .await?
+                } else {
+                    semantic_error::validate_success_response(response).await?
+                };
             }
             Ok((response, resolved_claude_api_format, outbound_model))
         } else {
@@ -4074,6 +4088,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_2xx_error_envelope_is_detected_before_success_record() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        let response = ProxyResponse::buffered(
+            StatusCode::OK,
+            headers,
+            Bytes::from_static(br#"{"code":1006,"msg":"balance exhausted"}"#),
+        );
+
+        let err = match crate::proxy::semantic_error::validate_success_response(response).await {
+            Ok(_) => panic!("semantic errors must not be recorded as provider success"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            ProxyError::TransformError(message) if message.contains("1006: balance exhausted")
+        ));
+    }
+
+    #[tokio::test]
+    async fn generic_2xx_success_payload_is_replayed_unchanged() {
+        let response = ProxyResponse::buffered(
+            StatusCode::OK,
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"choices":[{"message":{"content":"ok"}}]}"#),
+        );
+
+        let prepared = crate::proxy::semantic_error::validate_success_response(response)
+            .await
+            .expect("normal success payload should pass");
+        assert_eq!(
+            prepared
+                .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                .await
+                .unwrap(),
+            Bytes::from_static(br#"{"choices":[{"message":{"content":"ok"}}]}"#)
+        );
+    }
+
+    #[tokio::test]
     async fn streaming_success_primes_first_chunk_and_replays_it() {
         let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
         let response = ProxyResponse::streamed(
@@ -4119,6 +4173,34 @@ mod tests {
         };
 
         assert!(matches!(err, ProxyError::ForwardFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn generic_2xx_sse_error_event_is_detected_before_commit() {
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::iter(vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"event: error\n")),
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"data: {\"code\":1006,\"msg\":\"balance exhausted\"}\n\n",
+                )),
+            ]),
+        );
+
+        let err = match crate::proxy::semantic_error::validate_stream_start(
+            response,
+            Duration::from_secs(1),
+        )
+        .await
+        {
+            Ok(_) => panic!("semantic SSE errors must not be committed"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            ProxyError::TransformError(message) if message.contains("1006: balance exhausted")
+        ));
     }
 
     #[test]

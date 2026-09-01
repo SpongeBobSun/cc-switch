@@ -25,6 +25,7 @@ pub mod provider_router;
 pub mod providers;
 pub mod response_processor;
 pub(crate) mod server;
+pub(crate) mod semantic_error;
 pub mod session;
 pub(crate) mod sse;
 pub(crate) mod switch_lock;

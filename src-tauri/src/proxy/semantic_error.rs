@@ -171,9 +171,11 @@ pub(crate) async fn validate_stream_start(
 
             // One complete non-error event is enough to commit the stream. The
             // Responses-specific priming remains stricter in its own path.
-            if block.lines().any(|line| line.trim_start().starts_with("data:")) {
-                let replay =
-                    futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+            if block
+                .lines()
+                .any(|line| line.trim_start().starts_with("data:"))
+            {
+                let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
                 return Ok(ProxyResponse::streamed(status, headers, replay));
             }
         }
@@ -183,8 +185,7 @@ pub(crate) async fn validate_stream_start(
             // Unknown non-SSE payloads retain the old first-chunk behavior. JSON-looking
             // partial documents stay buffered so a split error envelope can be detected.
             if !matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'[')) {
-                let replay =
-                    futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
                 return Ok(ProxyResponse::streamed(status, headers, replay));
             }
         }
@@ -202,7 +203,10 @@ pub(crate) async fn validate_stream_start(
 fn value_error_message(value: &Value) -> Option<String> {
     let object = value.as_object()?;
 
-    if let Some(error) = object.get("error").filter(|value| is_meaningful_error(value)) {
+    if let Some(error) = object
+        .get("error")
+        .filter(|value| is_meaningful_error(value))
+    {
         return Some(format_error_value(error, object));
     }
 
@@ -283,11 +287,9 @@ fn is_meaningful_error(value: &Value) -> bool {
         Value::Object(object) => {
             field_label(object, &["type", "status"]).is_some()
                 || has_message_field(object)
-                || ["code", "error_code", "errorCode"].iter().any(|key| {
-                    object
-                        .get(*key)
-                        .is_some_and(|code| !is_success_code(code))
-                })
+                || ["code", "error_code", "errorCode"]
+                    .iter()
+                    .any(|key| object.get(*key).is_some_and(|code| !is_success_code(code)))
                 || object
                     .get("param")
                     .and_then(Value::as_str)
@@ -398,7 +400,7 @@ mod tests {
             Some("insufficient_quota: balance exhausted")
         );
         assert_eq!(
-            json_error_message(br#"{"success":false,"message":"余额不足"}"#).as_deref(),
+            json_error_message(r#"{"success":false,"message":"余额不足"}"#.as_bytes()).as_deref(),
             Some("余额不足")
         );
         assert_eq!(
@@ -414,15 +416,13 @@ mod tests {
         assert!(json_error_message(br#"{"error":"","choices":[{}]}"#).is_none());
         assert!(json_error_message(br#"{"status":"incomplete","output":[]}"#).is_none());
         assert_eq!(
-            json_error_message(br#"{"status":503,"message":"temporarily unavailable"}"#)
-                .as_deref(),
+            json_error_message(br#"{"status":503,"message":"temporarily unavailable"}"#).as_deref(),
             Some("503: temporarily unavailable")
         );
         assert!(json_error_message(br#"{"code":200,"msg":"ok","data":{}}"#).is_none());
         assert!(json_error_message(br#"{"message":"normal metadata","data":{}}"#).is_none());
         assert_eq!(
-            json_error_message(br#"{"data":{"code":1006,"msg":"balance exhausted"}}"#)
-                .as_deref(),
+            json_error_message(br#"{"data":{"code":1006,"msg":"balance exhausted"}}"#).as_deref(),
             Some("1006: balance exhausted")
         );
     }
@@ -437,8 +437,7 @@ mod tests {
             Some("overloaded: busy")
         );
         assert_eq!(
-            sse_error_message("data: {\"code\":429,\"msg\":\"quota exceeded\"}")
-                .as_deref(),
+            sse_error_message("data: {\"code\":429,\"msg\":\"quota exceeded\"}").as_deref(),
             Some("429: quota exceeded")
         );
         assert!(sse_error_message("data: {\"choices\":[{\"delta\":{}}]}").is_none());

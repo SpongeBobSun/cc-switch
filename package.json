@@ -1,6 +1,6 @@
 {
   "name": "cc-switch-relay",
-  "version": "3.20.2-relay.1",
+  "version": "3.20.2-relay.2",
   "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI",
   "type": "module",
   "scripts": {

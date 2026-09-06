@@ -1,0 +1,234 @@
+name: Release (unsigned)
+
+on:
+  push:
+    tags:
+      - "v*-relay.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-unsigned-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  VERSION: ${{ github.ref_name }}
+  UNSIGNED_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}'
+
+jobs:
+  windows:
+    name: Windows x64 unsigned
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup pnpm
+        shell: pwsh
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          node --version
+          pnpm --version
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned Tauri app
+        shell: pwsh
+        run: pnpm tauri build --ci --config $env:UNSIGNED_CONFIG --bundles msi
+
+      - name: Collect Windows artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactDir = 'release-assets'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          $msi = Get-ChildItem -Path 'src-tauri/target/release/bundle' -Recurse -Filter '*.msi' |
+            Select-Object -First 1
+          if ($null -eq $msi) {
+            throw 'No Windows MSI installer was produced'
+          }
+          Copy-Item $msi.FullName (Join-Path $artifactDir "CC-Switch-Relay-$env:VERSION-Windows-x64.msi")
+
+          $exe = 'src-tauri/target/release/cc-switch.exe'
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "Portable executable was not produced: $exe"
+          }
+          Copy-Item $exe (Join-Path $artifactDir "CC-Switch-Relay-$env:VERSION-Windows-x64.exe")
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-unsigned-windows
+          path: release-assets/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal unsigned
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS build targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Setup pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          node --version
+          pnpm --version
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned universal app
+        run: >-
+          pnpm tauri build --ci --target universal-apple-darwin --bundles app
+          --config '${{ env.UNSIGNED_CONFIG }}'
+
+      - name: Package macOS artifact
+        run: |
+          set -euo pipefail
+          artifact_dir=release-assets
+          app_path=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos \
+            -maxdepth 1 -type d -name '*.app' -print -quit)
+          if [ -z "$app_path" ]; then
+            echo 'No macOS .app bundle was produced' >&2
+            exit 1
+          fi
+          mkdir -p "$artifact_dir"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" \
+            "$artifact_dir/CC-Switch-Relay-${VERSION}-macOS-universal.zip"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-unsigned-macos
+          path: release-assets/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux x64 unsigned
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Setup pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          node --version
+          pnpm --version
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned Linux packages
+        run: >-
+          pnpm tauri build --ci --bundles appimage,deb,rpm
+          --config '${{ env.UNSIGNED_CONFIG }}'
+
+      - name: Collect Linux artifacts
+        run: |
+          set -euo pipefail
+          artifact_dir=release-assets
+          mkdir -p "$artifact_dir"
+          appimage=$(find src-tauri/target/release/bundle -type f \
+            \( -name '*.AppImage' -o -name '*.appimage' \) -print -quit)
+          deb=$(find src-tauri/target/release/bundle -type f -name '*.deb' -print -quit)
+          rpm=$(find src-tauri/target/release/bundle -type f -name '*.rpm' -print -quit)
+          for artifact in "$appimage" "$deb" "$rpm"; do
+            if [ -z "$artifact" ]; then
+              echo 'A Linux package was not produced' >&2
+              exit 1
+            fi
+          done
+          cp "$appimage" "$artifact_dir/CC-Switch-Relay-${VERSION}-Linux-x86_64.AppImage"
+          cp "$deb" "$artifact_dir/CC-Switch-Relay-${VERSION}-Linux-x86_64.deb"
+          cp "$rpm" "$artifact_dir/CC-Switch-Relay-${VERSION}-Linux-x86_64.rpm"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-unsigned-linux
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish unsigned GitHub Release
+    runs-on: ubuntu-22.04
+    needs: [windows, macos, linux]
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-unsigned-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release artifacts
+        run: ls -lh release-assets
+
+      - name: Publish prerelease
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: CC Switch Relay ${{ github.ref_name }} (unsigned)
+          prerelease: true
+          body: |
+            ## CC Switch Relay ${{ github.ref_name }}
+
+            This fork build is unsigned and is intended for testing or manual installation.
+            It does not include Tauri updater artifacts or automatic updates.
+
+            Source: [SpongeBobSun/cc-switch](https://github.com/SpongeBobSun/cc-switch)
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

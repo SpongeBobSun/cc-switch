@@ -3,7 +3,8 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
+      - "!v*-relay.*"
 
 permissions:
   contents: write
@@ -35,7 +36,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -131,7 +132,7 @@ jobs:
             echo "请检查 GitHub 仓库 Settings > Secrets and variables > Actions" >&2
             exit 1
           fi
-          
+
           RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
           # 目标：提供正确的私钥“文件路径”给 Tauri CLI，避免内容解码歧义
           KEY_PATH="$RUNNER_TEMP/tauri_signing.key"

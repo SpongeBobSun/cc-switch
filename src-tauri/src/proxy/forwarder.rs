@@ -36,7 +36,10 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http::Extensions;
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tauri::Manager;
 use tokio::sync::RwLock;
 
@@ -290,12 +293,14 @@ impl RequestForwarder {
 
     /// 返回本次 HTTP 429 后是否应在同一 Provider 上重试，以及等待多久。
     ///
-    /// `Retry-After` 高于用户配置的上限时宁可立刻走故障转移，避免单个被限流
-    /// 的站点让客户端请求长时间卡住；缺失/无效 Header 则使用 1s、2s…退避。
+    /// `Retry-After` 高于单次或本次请求剩余等待预算时宁可立刻走故障转移，避免
+    /// 多个被限流站点让客户端请求长时间卡住；缺失/无效 Header 则使用带抖动的
+    /// 2s、4s、8s…退避。
     fn rate_limit_retry_delay(
         &self,
         retry_count: u32,
         upstream_retry_after_seconds: Option<u64>,
+        total_waited: Duration,
     ) -> Option<Duration> {
         let config = &self.rate_limit_retry_config;
         if !config.enabled || retry_count >= config.max_retries {
@@ -303,21 +308,24 @@ impl RequestForwarder {
         }
 
         let max_wait_seconds = u64::from(config.max_wait_seconds);
-        if max_wait_seconds == 0 {
+        let max_wait = Duration::from_secs(max_wait_seconds);
+        let total_wait_budget = Duration::from_secs(u64::from(config.total_wait_seconds));
+        let remaining_wait_budget = total_wait_budget.checked_sub(total_waited)?;
+        if max_wait_seconds == 0 || remaining_wait_budget.is_zero() {
             return None;
         }
 
-        let delay_seconds = if config.respect_retry_after {
+        let delay = if config.respect_retry_after {
             match upstream_retry_after_seconds {
                 Some(seconds) if seconds > max_wait_seconds => return None,
-                Some(seconds) => seconds,
-                None => rate_limit_backoff_seconds(retry_count),
+                Some(seconds) => Duration::from_secs(seconds),
+                None => rate_limit_backoff_delay(retry_count).min(max_wait),
             }
         } else {
-            rate_limit_backoff_seconds(retry_count)
+            rate_limit_backoff_delay(retry_count).min(max_wait)
         };
 
-        Some(Duration::from_secs(delay_seconds.min(max_wait_seconds)))
+        (delay <= remaining_wait_budget).then_some(delay)
     }
 
     async fn record_success_result(
@@ -496,6 +504,9 @@ impl RequestForwarder {
         let mut last_error = None;
         let mut last_provider = None;
         let mut attempted_providers = 0usize;
+        // 同一客户端请求跨 Provider 共享 429 等待预算，防止每个站点都单独
+        // 等待上限而把容灾延迟叠加成数分钟。
+        let mut rate_limit_waited = Duration::ZERO;
 
         // 单 Provider 场景下跳过熔断器检查（故障转移关闭时）
         let bypass_circuit_breaker = providers.len() == 1;
@@ -590,18 +601,23 @@ impl RequestForwarder {
                     _ => break result,
                 };
 
-                let Some(delay) =
-                    self.rate_limit_retry_delay(rate_limit_retries, retry_after_seconds)
-                else {
+                let Some(delay) = self.rate_limit_retry_delay(
+                    rate_limit_retries,
+                    retry_after_seconds,
+                    rate_limit_waited,
+                ) else {
                     break result;
                 };
 
                 rate_limit_retries += 1;
+                rate_limit_waited = rate_limit_waited.saturating_add(delay);
                 log::info!(
-                    "[{app_type_str}] 上游 HTTP 429，{:.1}s 后重试同一 Provider（{}/{}）：provider={}{}",
+                    "[{app_type_str}] 上游 HTTP 429，{:.1}s 后重试同一 Provider（{}/{}，累计等待 {:.1}/{:.1}s）：provider={}{}",
                     delay.as_secs_f64(),
                     rate_limit_retries,
                     self.rate_limit_retry_config.max_retries,
+                    rate_limit_waited.as_secs_f64(),
+                    self.rate_limit_retry_config.total_wait_seconds,
                     provider.name,
                     retry_after_seconds
                         .map(|seconds| format!(", Retry-After={seconds}s"))
@@ -3008,8 +3024,26 @@ fn summarize_proxy_error(error: &ProxyError) -> String {
     }
 }
 
-fn rate_limit_backoff_seconds(retry_count: u32) -> u64 {
-    1_u64.checked_shl(retry_count.min(63)).unwrap_or(u64::MAX)
+/// 无 Retry-After 时的指数退避（2s、4s、8s…），再加最多 ±20% 的抖动，避免
+/// 多个客户端在相同限流窗口结束时同时冲击上游。
+fn rate_limit_backoff_delay(retry_count: u32) -> Duration {
+    let base_millis = 2_u64
+        .checked_shl(retry_count.min(62))
+        .unwrap_or(u64::MAX)
+        .saturating_mul(1_000);
+    let jitter_millis = base_millis / 5;
+    let jitter_span = jitter_millis.saturating_mul(2).saturating_add(1);
+    let entropy = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::from(duration.subsec_nanos()))
+        .unwrap_or_default();
+    let offset = entropy % jitter_span;
+
+    Duration::from_millis(
+        base_millis
+            .saturating_sub(jitter_millis)
+            .saturating_add(offset),
+    )
 }
 
 /// 解析 HTTP Retry-After，支持 delta-seconds 与 HTTP-date 两种标准格式。
@@ -3971,12 +4005,14 @@ mod tests {
 
         assert_eq!(
             forwarder
-                .rate_limit_retry_delay(0, Some(12))
+                .rate_limit_retry_delay(0, Some(12), Duration::ZERO)
                 .expect("retry should be allowed"),
             Duration::from_secs(12)
         );
         assert!(
-            forwarder.rate_limit_retry_delay(0, Some(31)).is_none(),
+            forwarder
+                .rate_limit_retry_delay(0, Some(61), Duration::ZERO)
+                .is_none(),
             "an excessive Retry-After should fail over immediately"
         );
     }
@@ -3985,19 +4021,53 @@ mod tests {
     fn rate_limit_retry_falls_back_to_bounded_exponential_backoff() {
         let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
 
+        let first = forwarder
+            .rate_limit_retry_delay(0, None, Duration::ZERO)
+            .expect("first retry should be allowed");
+        assert!((Duration::from_millis(1_600)..=Duration::from_millis(2_400)).contains(&first));
+        let second = forwarder
+            .rate_limit_retry_delay(1, None, first)
+            .expect("second retry should be allowed");
+        assert!((Duration::from_millis(3_200)..=Duration::from_millis(4_800)).contains(&second));
+        let third = forwarder
+            .rate_limit_retry_delay(2, None, first + second)
+            .expect("third retry should be allowed");
+        assert!((Duration::from_millis(6_400)..=Duration::from_millis(9_600)).contains(&third));
+        assert!(forwarder
+            .rate_limit_retry_delay(3, None, first + second + third)
+            .is_none());
+    }
+
+    #[test]
+    fn rate_limit_retry_respects_cumulative_wait_budget() {
+        let mut forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        forwarder.rate_limit_retry_config.total_wait_seconds = 20;
+
         assert_eq!(
             forwarder
-                .rate_limit_retry_delay(0, None)
-                .expect("first retry should be allowed"),
-            Duration::from_secs(1)
+                .rate_limit_retry_delay(0, Some(12), Duration::ZERO)
+                .expect("first retry should fit in the budget"),
+            Duration::from_secs(12)
         );
+        assert!(
+            forwarder
+                .rate_limit_retry_delay(1, Some(12), Duration::from_secs(12))
+                .is_none(),
+            "a retry that exceeds the remaining request budget should fail over"
+        );
+    }
+
+    #[test]
+    fn rate_limit_fallback_backoff_is_capped_per_retry() {
+        let mut forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        forwarder.rate_limit_retry_config.max_wait_seconds = 3;
+
         assert_eq!(
             forwarder
-                .rate_limit_retry_delay(1, None)
-                .expect("second retry should be allowed"),
-            Duration::from_secs(2)
+                .rate_limit_retry_delay(2, None, Duration::ZERO)
+                .expect("retry should be capped rather than skipped"),
+            Duration::from_secs(3)
         );
-        assert!(forwarder.rate_limit_retry_delay(2, None).is_none());
     }
 
     #[test]
@@ -4005,12 +4075,10 @@ mod tests {
         let mut forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
         forwarder.rate_limit_retry_config.respect_retry_after = false;
 
-        assert_eq!(
-            forwarder
-                .rate_limit_retry_delay(0, Some(20))
-                .expect("retry should be allowed"),
-            Duration::from_secs(1)
-        );
+        let delay = forwarder
+            .rate_limit_retry_delay(0, Some(20), Duration::ZERO)
+            .expect("retry should be allowed");
+        assert!((Duration::from_millis(1_600)..=Duration::from_millis(2_400)).contains(&delay));
     }
 
     #[test]

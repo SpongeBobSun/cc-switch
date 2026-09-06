@@ -249,6 +249,7 @@ impl RequestContext {
                     && self.app_config.retry_on_rate_limit,
                 max_retries: self.app_config.rate_limit_max_retries,
                 max_wait_seconds: self.app_config.rate_limit_max_wait_seconds,
+                total_wait_seconds: self.app_config.rate_limit_total_wait_seconds,
                 respect_retry_after: self.app_config.rate_limit_respect_retry_after,
             },
         )

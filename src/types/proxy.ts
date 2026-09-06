@@ -141,5 +141,6 @@ export interface AppProxyConfig {
   retryOnRateLimit: boolean;
   rateLimitMaxRetries: number;
   rateLimitMaxWaitSeconds: number;
+  rateLimitTotalWaitSeconds: number;
   rateLimitRespectRetryAfter: boolean;
 }

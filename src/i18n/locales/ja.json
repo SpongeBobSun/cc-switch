@@ -2955,11 +2955,13 @@
       "rateLimitEnabled": "429 自動リトライを有効にする",
       "rateLimitEnabledHint": "自動フェイルオーバーが有効な場合にのみ機能します",
       "rateLimitMaxRetries": "同一プロバイダーでの最大リトライ回数",
-      "rateLimitMaxRetriesHint": "429 後に現在のプロバイダーへ再送する回数（0-5）",
+      "rateLimitMaxRetriesHint": "429 後に現在のプロバイダーへ再送する回数（0-5、既定値 3 回）",
       "rateLimitMaxWait": "1 回あたりの最大待機時間（秒）",
-      "rateLimitMaxWaitHint": "上流の待機要求がこれを超える場合、直ちに次のプロバイダーを試します（1-300 秒）",
+      "rateLimitMaxWaitHint": "上流の待機要求がこれを超える場合、直ちに次のプロバイダーを試します（1-300 秒、既定値 60 秒）",
+      "rateLimitTotalWait": "リクエスト全体の待機上限（秒）",
+      "rateLimitTotalWaitHint": "すべてのフェイルオーバープロバイダーで待機予算を共有し、使い切るとフェイルオーバーを続行します（1-600 秒、既定値 60 秒）",
       "respectRetryAfter": "Retry-After を優先する",
-      "respectRetryAfterHint": "ヘッダーがないか無効な場合は 1 秒、2 秒のバックオフを使用します",
+      "respectRetryAfterHint": "ヘッダーがないか無効な場合は、約 2 秒、4 秒、8 秒のジッター付きバックオフを使用します",
       "rateLimitRetryWarning": "リトライでは元のリクエストを再送します。通常 429 は未受理を示しますが、異常な上流では重複実行の可能性があります。"
     },
     "logging": {

@@ -2955,11 +2955,13 @@
       "rateLimitEnabled": "启用 429 自动重试",
       "rateLimitEnabledHint": "仅在自动故障转移启用时生效",
       "rateLimitMaxRetries": "同站点最大重试次数",
-      "rateLimitMaxRetriesHint": "429 后在当前供应商重发请求的次数（0-5）",
+      "rateLimitMaxRetriesHint": "429 后在当前供应商重发请求的次数（0-5，默认 3 次）",
       "rateLimitMaxWait": "单次最大等待时间（秒）",
-      "rateLimitMaxWaitHint": "上游要求等待更久时，立即改走下一个供应商（1-300 秒）",
+      "rateLimitMaxWaitHint": "上游要求等待更久时，立即改走下一个供应商（1-300 秒，默认 60 秒）",
+      "rateLimitTotalWait": "本次请求累计等待上限（秒）",
+      "rateLimitTotalWaitHint": "所有容灾供应商共享此等待预算，耗尽后继续故障转移（1-600 秒，默认 60 秒）",
       "respectRetryAfter": "优先遵守 Retry-After",
-      "respectRetryAfterHint": "未提供或格式无效时使用 1 秒、2 秒的退避等待",
+      "respectRetryAfterHint": "未提供或格式无效时使用约 2 秒、4 秒、8 秒的带抖动退避等待",
       "rateLimitRetryWarning": "重试会重发原始请求；通常 429 表示上游未接受请求，但异常上游仍可能出现重复执行。"
     },
     "logging": {

@@ -134,8 +134,9 @@ impl Database {
             circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60, circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
             circuit_min_requests INTEGER NOT NULL DEFAULT 10,
             retry_on_rate_limit INTEGER NOT NULL DEFAULT 1,
-            rate_limit_max_retries INTEGER NOT NULL DEFAULT 2,
-            rate_limit_max_wait_seconds INTEGER NOT NULL DEFAULT 30,
+            rate_limit_max_retries INTEGER NOT NULL DEFAULT 3,
+            rate_limit_max_wait_seconds INTEGER NOT NULL DEFAULT 60,
+            rate_limit_total_wait_seconds INTEGER NOT NULL DEFAULT 60,
             rate_limit_respect_retry_after INTEGER NOT NULL DEFAULT 1,
             default_cost_multiplier TEXT NOT NULL DEFAULT '1',
             pricing_model_source TEXT NOT NULL DEFAULT 'response',
@@ -557,6 +558,11 @@ impl Database {
                         log::info!("迁移数据库从 v18 到 v19（429 限流重试策略）");
                         Self::migrate_v18_to_v19(conn)?;
                         Self::set_user_version(conn, 19)?;
+                    }
+                    19 => {
+                        log::info!("迁移数据库从 v19 到 v20（429 累计等待预算）");
+                        Self::migrate_v19_to_v20(conn)?;
+                        Self::set_user_version(conn, 20)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1635,6 +1641,36 @@ impl Database {
                 "rate_limit_respect_retry_after",
                 "INTEGER NOT NULL DEFAULT 1",
             )?;
+        }
+        Ok(())
+    }
+
+    /// v19 -> v20: 为 429 重试添加跨 Provider 共享的累计等待预算，并把此前
+    /// 的默认 2 次 / 30 秒调整为 3 次 / 60 秒。仅更新旧默认值，保留用户已修改
+    /// 的策略。
+    fn migrate_v19_to_v20(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_config")? {
+            Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "rate_limit_total_wait_seconds",
+                "INTEGER NOT NULL DEFAULT 60",
+            )?;
+
+            conn.execute(
+                "UPDATE proxy_config
+                 SET rate_limit_max_retries = 3
+                 WHERE rate_limit_max_retries = 2",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+            conn.execute(
+                "UPDATE proxy_config
+                 SET rate_limit_max_wait_seconds = 60
+                 WHERE rate_limit_max_wait_seconds = 30",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
         }
         Ok(())
     }
@@ -3525,9 +3561,12 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v18_to_v19_adds_rate_limit_retry_columns() -> Result<(), AppError> {
+    fn migrate_v18_to_v20_adds_rate_limit_retry_columns_and_defaults() -> Result<(), AppError> {
         let conn = Connection::open_in_memory()?;
-        conn.execute("CREATE TABLE proxy_config (app_type TEXT PRIMARY KEY)", [])?;
+        conn.execute_batch(
+            "CREATE TABLE proxy_config (app_type TEXT PRIMARY KEY);
+             INSERT INTO proxy_config VALUES ('codex');",
+        )?;
         Database::set_user_version(&conn, 18)?;
 
         Database::apply_schema_migrations_on_conn(&conn)?;
@@ -3537,10 +3576,45 @@ mod tests {
             "retry_on_rate_limit",
             "rate_limit_max_retries",
             "rate_limit_max_wait_seconds",
+            "rate_limit_total_wait_seconds",
             "rate_limit_respect_retry_after",
         ] {
             assert!(Database::has_column(&conn, "proxy_config", column)?);
         }
+        let (max_retries, max_wait, total_wait): (i32, i32, i32) = conn.query_row(
+            "SELECT rate_limit_max_retries, rate_limit_max_wait_seconds,
+                    rate_limit_total_wait_seconds
+             FROM proxy_config WHERE app_type = 'codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!((max_retries, max_wait, total_wait), (3, 60, 60));
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v19_to_v20_preserves_custom_rate_limit_settings() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE proxy_config (
+                app_type TEXT PRIMARY KEY,
+                rate_limit_max_retries INTEGER NOT NULL,
+                rate_limit_max_wait_seconds INTEGER NOT NULL
+             );
+             INSERT INTO proxy_config VALUES ('codex', 4, 90);",
+        )?;
+        Database::set_user_version(&conn, 19)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        let (max_retries, max_wait, total_wait): (i32, i32, i32) = conn.query_row(
+            "SELECT rate_limit_max_retries, rate_limit_max_wait_seconds,
+                    rate_limit_total_wait_seconds
+             FROM proxy_config WHERE app_type = 'codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!((max_retries, max_wait, total_wait), (4, 90, 60));
         Ok(())
     }
 }

@@ -2955,11 +2955,13 @@
       "rateLimitEnabled": "Enable automatic 429 retries",
       "rateLimitEnabledHint": "Only takes effect when auto failover is enabled",
       "rateLimitMaxRetries": "Max retries on the same provider",
-      "rateLimitMaxRetriesHint": "How many times to resend to the current provider after a 429 (0-5)",
+      "rateLimitMaxRetriesHint": "How many times to resend to the current provider after a 429 (0-5, default 3)",
       "rateLimitMaxWait": "Max wait per retry (seconds)",
-      "rateLimitMaxWaitHint": "If upstream asks for longer, immediately try the next provider (1-300s)",
+      "rateLimitMaxWaitHint": "If upstream asks for longer, immediately try the next provider (1-300s, default 60s)",
+      "rateLimitTotalWait": "Total wait budget per request (seconds)",
+      "rateLimitTotalWaitHint": "All failover providers share this wait budget; failover continues when it is exhausted (1-600s, default 60s)",
       "respectRetryAfter": "Prefer Retry-After",
-      "respectRetryAfterHint": "Use 1s, then 2s backoff when the header is absent or invalid",
+      "respectRetryAfterHint": "Use jittered backoff of about 2s, 4s, then 8s when the header is absent or invalid",
       "rateLimitRetryWarning": "Retries resend the original request. A 429 normally means it was not accepted, but a faulty upstream could still execute it twice."
     },
     "logging": {

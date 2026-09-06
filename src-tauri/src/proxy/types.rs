@@ -184,6 +184,37 @@ pub struct AppProxyConfig {
     pub circuit_error_rate_threshold: f64,
     /// 计算错误率的最小请求数
     pub circuit_min_requests: u32,
+    /// 是否对上游 HTTP 429 在同一 Provider 上自动重试
+    pub retry_on_rate_limit: bool,
+    /// 同一 Provider 遇到 429 后的最大重试次数
+    pub rate_limit_max_retries: u32,
+    /// 单次 429 等待的最大秒数，超过时直接交给故障转移
+    pub rate_limit_max_wait_seconds: u32,
+    /// 是否优先遵守上游的 Retry-After 响应头
+    pub rate_limit_respect_retry_after: bool,
+}
+
+/// 单个 Provider 的 HTTP 429 重试策略。
+///
+/// 与 `AppProxyConfig::max_retries`（切换到下一个 Provider 的次数）保持分离，
+/// 避免同一 Provider 的短暂限流消耗故障转移预算。
+#[derive(Debug, Clone)]
+pub struct RateLimitRetryConfig {
+    pub enabled: bool,
+    pub max_retries: u32,
+    pub max_wait_seconds: u32,
+    pub respect_retry_after: bool,
+}
+
+impl Default for RateLimitRetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: 2,
+            max_wait_seconds: 30,
+            respect_retry_after: true,
+        }
+    }
 }
 
 /// 整流器配置

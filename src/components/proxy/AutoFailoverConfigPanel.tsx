@@ -4,7 +4,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Save, Loader2, Info } from "lucide-react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Switch } from "@/components/ui/switch";
+import { Save, Loader2, Info, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 import { useAppProxyConfig, useUpdateAppProxyConfig } from "@/lib/query/proxy";
 
@@ -20,6 +26,7 @@ export function AutoFailoverConfigPanel({
   const { t } = useTranslation();
   const { data: config, isLoading, error } = useAppProxyConfig(appType);
   const updateConfig = useUpdateAppProxyConfig();
+  const [rateLimitSettingsOpen, setRateLimitSettingsOpen] = useState(false);
 
   // 使用字符串状态以支持完全清空数字输入框
   const [formData, setFormData] = useState({
@@ -33,6 +40,10 @@ export function AutoFailoverConfigPanel({
     circuitTimeoutSeconds: "60",
     circuitErrorRateThreshold: "50", // 存储百分比值
     circuitMinRequests: "10",
+    retryOnRateLimit: true,
+    rateLimitMaxRetries: "2",
+    rateLimitMaxWaitSeconds: "30",
+    rateLimitRespectRetryAfter: true,
   });
 
   useEffect(() => {
@@ -50,6 +61,10 @@ export function AutoFailoverConfigPanel({
           Math.round(config.circuitErrorRateThreshold * 100),
         ),
         circuitMinRequests: String(config.circuitMinRequests),
+        retryOnRateLimit: config.retryOnRateLimit,
+        rateLimitMaxRetries: String(config.rateLimitMaxRetries),
+        rateLimitMaxWaitSeconds: String(config.rateLimitMaxWaitSeconds),
+        rateLimitRespectRetryAfter: config.rateLimitRespectRetryAfter,
       });
     }
   }, [config]);
@@ -75,6 +90,8 @@ export function AutoFailoverConfigPanel({
       circuitTimeoutSeconds: { min: 0, max: 300 },
       circuitErrorRateThreshold: { min: 0, max: 100 },
       circuitMinRequests: { min: 5, max: 100 },
+      rateLimitMaxRetries: { min: 0, max: 5 },
+      rateLimitMaxWaitSeconds: { min: 1, max: 300 },
     };
 
     // 解析原始值
@@ -88,6 +105,8 @@ export function AutoFailoverConfigPanel({
       circuitTimeoutSeconds: parseNum(formData.circuitTimeoutSeconds),
       circuitErrorRateThreshold: parseNum(formData.circuitErrorRateThreshold),
       circuitMinRequests: parseNum(formData.circuitMinRequests),
+      rateLimitMaxRetries: parseNum(formData.rateLimitMaxRetries),
+      rateLimitMaxWaitSeconds: parseNum(formData.rateLimitMaxWaitSeconds),
     };
 
     // 校验是否超出范围（NaN 也视为无效）
@@ -147,6 +166,18 @@ export function AutoFailoverConfigPanel({
       ranges.circuitMinRequests,
       t("proxy.autoFailover.minRequests", "最小请求数"),
     );
+    if (formData.retryOnRateLimit) {
+      checkRange(
+        raw.rateLimitMaxRetries,
+        ranges.rateLimitMaxRetries,
+        t("proxy.autoFailover.rateLimitMaxRetries", "429 同站点最大重试次数"),
+      );
+      checkRange(
+        raw.rateLimitMaxWaitSeconds,
+        ranges.rateLimitMaxWaitSeconds,
+        t("proxy.autoFailover.rateLimitMaxWait", "429 最大等待时间"),
+      );
+    }
 
     if (errors.length > 0) {
       toast.error(
@@ -172,6 +203,10 @@ export function AutoFailoverConfigPanel({
         circuitTimeoutSeconds: raw.circuitTimeoutSeconds,
         circuitErrorRateThreshold: raw.circuitErrorRateThreshold / 100,
         circuitMinRequests: raw.circuitMinRequests,
+        retryOnRateLimit: formData.retryOnRateLimit,
+        rateLimitMaxRetries: raw.rateLimitMaxRetries,
+        rateLimitMaxWaitSeconds: raw.rateLimitMaxWaitSeconds,
+        rateLimitRespectRetryAfter: formData.rateLimitRespectRetryAfter,
       });
       toast.success(
         t("proxy.autoFailover.configSaved", "自动故障转移配置已保存"),
@@ -199,6 +234,10 @@ export function AutoFailoverConfigPanel({
           Math.round(config.circuitErrorRateThreshold * 100),
         ),
         circuitMinRequests: String(config.circuitMinRequests),
+        retryOnRateLimit: config.retryOnRateLimit,
+        rateLimitMaxRetries: String(config.rateLimitMaxRetries),
+        rateLimitMaxWaitSeconds: String(config.rateLimitMaxWaitSeconds),
+        rateLimitRespectRetryAfter: config.rateLimitRespectRetryAfter,
       });
     }
   };
@@ -212,6 +251,7 @@ export function AutoFailoverConfigPanel({
   }
 
   const isDisabled = disabled || updateConfig.isPending;
+  const rateLimitInputsDisabled = isDisabled || !formData.retryOnRateLimit;
 
   return (
     <div className="border-0 rounded-none shadow-none bg-transparent">
@@ -231,6 +271,159 @@ export function AutoFailoverConfigPanel({
             )}
           </AlertDescription>
         </Alert>
+
+        <Collapsible
+          open={rateLimitSettingsOpen}
+          onOpenChange={setRateLimitSettingsOpen}
+        >
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="flex w-full items-center justify-between gap-3 rounded-lg border border-white/10 bg-muted/30 px-4 py-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span>
+                <span className="block text-sm font-semibold">
+                  {t("proxy.autoFailover.rateLimitTitle", "429 限流自动重试")}
+                </span>
+                <span className="block pt-1 text-xs text-muted-foreground">
+                  {t(
+                    "proxy.autoFailover.rateLimitDescription",
+                    "先等待并重试当前供应商，失败后再继续故障转移",
+                  )}
+                </span>
+              </span>
+              <ChevronDown
+                className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
+                  rateLimitSettingsOpen ? "rotate-180" : ""
+                }`}
+                aria-hidden="true"
+              />
+            </button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="mt-3 space-y-4 rounded-lg border border-white/10 bg-muted/30 p-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <Label htmlFor={`retryOnRateLimit-${appType}`}>
+                    {t(
+                      "proxy.autoFailover.rateLimitEnabled",
+                      "启用 429 自动重试",
+                    )}
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      "proxy.autoFailover.rateLimitEnabledHint",
+                      "仅在自动故障转移启用时生效",
+                    )}
+                  </p>
+                </div>
+                <Switch
+                  id={`retryOnRateLimit-${appType}`}
+                  checked={formData.retryOnRateLimit}
+                  onCheckedChange={(checked) =>
+                    setFormData({ ...formData, retryOnRateLimit: checked })
+                  }
+                  disabled={isDisabled}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor={`rateLimitMaxRetries-${appType}`}>
+                    {t(
+                      "proxy.autoFailover.rateLimitMaxRetries",
+                      "同站点最大重试次数",
+                    )}
+                  </Label>
+                  <Input
+                    id={`rateLimitMaxRetries-${appType}`}
+                    type="number"
+                    min="0"
+                    max="5"
+                    value={formData.rateLimitMaxRetries}
+                    onChange={(event) =>
+                      setFormData({
+                        ...formData,
+                        rateLimitMaxRetries: event.target.value,
+                      })
+                    }
+                    disabled={rateLimitInputsDisabled}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      "proxy.autoFailover.rateLimitMaxRetriesHint",
+                      "429 后在当前供应商重发请求的次数（0-5）",
+                    )}
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor={`rateLimitMaxWait-${appType}`}>
+                    {t(
+                      "proxy.autoFailover.rateLimitMaxWait",
+                      "单次最大等待时间（秒）",
+                    )}
+                  </Label>
+                  <Input
+                    id={`rateLimitMaxWait-${appType}`}
+                    type="number"
+                    min="1"
+                    max="300"
+                    value={formData.rateLimitMaxWaitSeconds}
+                    onChange={(event) =>
+                      setFormData({
+                        ...formData,
+                        rateLimitMaxWaitSeconds: event.target.value,
+                      })
+                    }
+                    disabled={rateLimitInputsDisabled}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      "proxy.autoFailover.rateLimitMaxWaitHint",
+                      "上游要求等待更久时，立即改走下一个供应商（1-300 秒）",
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-4 rounded-md border border-border/50 p-3">
+                <div className="space-y-1">
+                  <Label htmlFor={`respectRetryAfter-${appType}`}>
+                    {t(
+                      "proxy.autoFailover.respectRetryAfter",
+                      "优先遵守 Retry-After",
+                    )}
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      "proxy.autoFailover.respectRetryAfterHint",
+                      "未提供或格式无效时使用 1 秒、2 秒的退避等待",
+                    )}
+                  </p>
+                </div>
+                <Switch
+                  id={`respectRetryAfter-${appType}`}
+                  checked={formData.rateLimitRespectRetryAfter}
+                  onCheckedChange={(checked) =>
+                    setFormData({
+                      ...formData,
+                      rateLimitRespectRetryAfter: checked,
+                    })
+                  }
+                  disabled={rateLimitInputsDisabled}
+                />
+              </div>
+
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                {t(
+                  "proxy.autoFailover.rateLimitRetryWarning",
+                  "重试会重发原始请求；通常 429 表示上游未接受请求，但异常上游仍可能出现重复执行。",
+                )}
+              </p>
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
 
         {/* 重试与超时配置 */}
         <div className="space-y-4 rounded-lg border border-white/10 bg-muted/30 p-4">

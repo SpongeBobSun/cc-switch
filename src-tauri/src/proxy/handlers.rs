@@ -1902,6 +1902,15 @@ fn codex_proxy_error_json(
                 Some(*status),
             )
         }
+        ProxyError::RateLimited { body, .. } => {
+            let parsed_body = body
+                .as_deref()
+                .map(|body| serde_json::from_str::<Value>(body).unwrap_or_else(|_| json!(body)));
+            (
+                transform_codex_chat::chat_error_to_response_error(parsed_body.as_ref()),
+                Some(429),
+            )
+        }
         _ => (
             json!({
                 "error": {
@@ -2015,6 +2024,7 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         ProxyError::InvalidRequest(_) => "cc_switch_invalid_request",
         ProxyError::AuthError(_) => "cc_switch_auth_error",
         ProxyError::UpstreamError { .. } => "cc_switch_upstream_error",
+        ProxyError::RateLimited { .. } => "cc_switch_upstream_rate_limited",
         ProxyError::DatabaseError(_) => "cc_switch_database_error",
         ProxyError::Internal(_) => "cc_switch_internal_error",
         ProxyError::AlreadyRunning

@@ -1,4 +1,4 @@
-id: com.ccswitch.desktop
+id: io.github.spongebobsun.ccswitch
 
 runtime: org.gnome.Platform
 runtime-version: '46'
@@ -93,6 +93,6 @@ modules:
       - cp -a usr/* /app/
       # Use our own desktop/metainfo/icon to align with Flatpak app id
       - rm -f /app/share/applications/*.desktop
-      - install -Dm644 com.ccswitch.desktop.desktop /app/share/applications/com.ccswitch.desktop.desktop
-      - install -Dm644 com.ccswitch.desktop.metainfo.xml /app/share/metainfo/com.ccswitch.desktop.metainfo.xml
-      - install -Dm644 128x128.png /app/share/icons/hicolor/128x128/apps/com.ccswitch.desktop.png
+      - install -Dm644 com.ccswitch.desktop.desktop /app/share/applications/io.github.spongebobsun.ccswitch.desktop
+      - install -Dm644 com.ccswitch.desktop.metainfo.xml /app/share/metainfo/io.github.spongebobsun.ccswitch.metainfo.xml
+      - install -Dm644 128x128.png /app/share/icons/hicolor/128x128/apps/io.github.spongebobsun.ccswitch.png

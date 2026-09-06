@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>com.ccswitch.desktop</id>
-  <name>CC Switch</name>
+  <id>io.github.spongebobsun.ccswitch</id>
+  <name>CC Switch SpongeBobSun</name>
   <summary>All-in-One Assistant for Claude Code, Codex &amp; Gemini CLI</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
@@ -15,11 +15,11 @@
     </ul>
   </description>
 
-  <launchable type="desktop-id">com.ccswitch.desktop.desktop</launchable>
+  <launchable type="desktop-id">io.github.spongebobsun.ccswitch.desktop</launchable>
   <provides>
     <binary>cc-switch</binary>
   </provides>
 
-  <url type="homepage">https://github.com/farion1231/cc-switch</url>
-  <url type="bugtracker">https://github.com/farion1231/cc-switch/issues</url>
+  <url type="homepage">https://github.com/SpongeBobSun/cc-switch</url>
+  <url type="bugtracker">https://github.com/SpongeBobSun/cc-switch/issues</url>
 </component>

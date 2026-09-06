@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "CC Switch",
+    "title": "CC Switch SpongeBobSun",
     "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
   },
   "common": {
@@ -2949,7 +2949,18 @@
       "maxRetriesHint": "リクエスト失敗時のリトライ回数（0-10）",
       "streamingFirstByteHint": "最初のデータチャンクを待つ最大時間、範囲 1-120 秒、デフォルト 60 秒",
       "streamingIdleHint": "データチャンク間の最大間隔、範囲 60-600 秒、0 で無効化（途中停止を防止）",
-      "nonStreamingHint": "非ストリーミングリクエストの合計タイムアウト、範囲 60-1200 秒、デフォルト 600 秒（10 分）"
+      "nonStreamingHint": "非ストリーミングリクエストの合計タイムアウト、範囲 60-1200 秒、デフォルト 600 秒（10 分）",
+      "rateLimitTitle": "HTTP 429 レート制限の自動リトライ",
+      "rateLimitDescription": "現在のプロバイダーで待機・再試行してからフェイルオーバーを続行します",
+      "rateLimitEnabled": "429 自動リトライを有効にする",
+      "rateLimitEnabledHint": "自動フェイルオーバーが有効な場合にのみ機能します",
+      "rateLimitMaxRetries": "同一プロバイダーでの最大リトライ回数",
+      "rateLimitMaxRetriesHint": "429 後に現在のプロバイダーへ再送する回数（0-5）",
+      "rateLimitMaxWait": "1 回あたりの最大待機時間（秒）",
+      "rateLimitMaxWaitHint": "上流の待機要求がこれを超える場合、直ちに次のプロバイダーを試します（1-300 秒）",
+      "respectRetryAfter": "Retry-After を優先する",
+      "respectRetryAfterHint": "ヘッダーがないか無効な場合は 1 秒、2 秒のバックオフを使用します",
+      "rateLimitRetryWarning": "リトライでは元のリクエストを再送します。通常 429 は未受理を示しますが、異常な上流では重複実行の可能性があります。"
     },
     "logging": {
       "enabled": "ログ記録が有効になりました",

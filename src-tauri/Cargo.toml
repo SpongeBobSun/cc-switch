@@ -4,7 +4,7 @@ version = "3.20.1"
 description = "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 authors = ["Jason Young"]
 license = "MIT"
-repository = "https://github.com/farion1231/cc-switch"
+repository = "https://github.com/SpongeBobSun/cc-switch"
 edition = "2021"
 rust-version = "1.85.0"
 
@@ -55,6 +55,7 @@ hyper = { version = "1.0", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1", "client-legacy"] }
 hyper-rustls = { version = "0.27", features = ["http1", "tls12", "ring", "webpki-tokio"] }
 http = "1"
+httpdate = "1"
 http-body = "1"
 http-body-util = "0.1"
 httparse = "1"

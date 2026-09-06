@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "CC Switch",
+    "title": "CC Switch SpongeBobSun",
     "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"
   },
   "common": {
@@ -2950,7 +2950,18 @@
       "maxRetriesHint": "請求失敗時的重試次數（0-10）",
       "streamingFirstByteHint": "等待首個資料區塊的最大時間，範圍 1-120 秒，預設 60 秒",
       "streamingIdleHint": "資料區塊之間的最大間隔，範圍 60-600 秒，填 0 停用（防止中途卡住）",
-      "nonStreamingHint": "非串流請求的總逾時時間，範圍 60-1200 秒，預設 600 秒（10 分鐘）"
+      "nonStreamingHint": "非串流請求的總逾時時間，範圍 60-1200 秒，預設 600 秒（10 分鐘）",
+      "rateLimitTitle": "429 限流自動重試",
+      "rateLimitDescription": "先等待並重試目前供應商，失敗後再繼續故障轉移",
+      "rateLimitEnabled": "啟用 429 自動重試",
+      "rateLimitEnabledHint": "僅在啟用自動故障轉移時生效",
+      "rateLimitMaxRetries": "同站點最大重試次數",
+      "rateLimitMaxRetriesHint": "429 後在目前供應商重新傳送請求的次數（0-5）",
+      "rateLimitMaxWait": "單次最大等待時間（秒）",
+      "rateLimitMaxWaitHint": "上游要求等待更久時，立即改走下一個供應商（1-300 秒）",
+      "respectRetryAfter": "優先遵守 Retry-After",
+      "respectRetryAfterHint": "未提供或格式無效時使用 1 秒、2 秒的退避等待",
+      "rateLimitRetryWarning": "重試會重新傳送原始請求；通常 429 表示上游未接受請求，但異常上游仍可能重複執行。"
     },
     "logging": {
       "enabled": "日誌紀錄已啟用",

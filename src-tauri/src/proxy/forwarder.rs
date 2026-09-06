@@ -20,7 +20,9 @@ use super::{
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
     },
-    types::{CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RectifierConfig},
+    types::{
+        CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RateLimitRetryConfig, RectifierConfig,
+    },
     ProxyError,
 };
 use crate::commands::{CodexOAuthState, CopilotAuthState, XaiOAuthState};
@@ -34,7 +36,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http::Extensions;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tauri::Manager;
 use tokio::sync::RwLock;
 
@@ -189,6 +191,8 @@ pub struct RequestForwarder {
     /// `max_attempts = max_retries + 1`，所以 max_retries=0 表示仅尝试一家、
     /// max_retries=3（默认）表示最多 4 家。loop 同时受 providers.len() 自然限制。
     max_attempts: usize,
+    /// 上游 HTTP 429 的同 Provider 重试策略。
+    rate_limit_retry_config: RateLimitRetryConfig,
 }
 
 impl RequestForwarder {
@@ -256,6 +260,7 @@ impl RequestForwarder {
         optimizer_config: OptimizerConfig,
         copilot_optimizer_config: CopilotOptimizerConfig,
         max_retries: u32,
+        rate_limit_retry_config: RateLimitRetryConfig,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
@@ -279,7 +284,40 @@ impl RequestForwarder {
                 streaming_first_byte_timeout,
             ),
             max_attempts,
+            rate_limit_retry_config,
         }
+    }
+
+    /// 返回本次 HTTP 429 后是否应在同一 Provider 上重试，以及等待多久。
+    ///
+    /// `Retry-After` 高于用户配置的上限时宁可立刻走故障转移，避免单个被限流
+    /// 的站点让客户端请求长时间卡住；缺失/无效 Header 则使用 1s、2s…退避。
+    fn rate_limit_retry_delay(
+        &self,
+        retry_count: u32,
+        upstream_retry_after_seconds: Option<u64>,
+    ) -> Option<Duration> {
+        let config = &self.rate_limit_retry_config;
+        if !config.enabled || retry_count >= config.max_retries {
+            return None;
+        }
+
+        let max_wait_seconds = u64::from(config.max_wait_seconds);
+        if max_wait_seconds == 0 {
+            return None;
+        }
+
+        let delay_seconds = if config.respect_retry_after {
+            match upstream_retry_after_seconds {
+                Some(seconds) if seconds > max_wait_seconds => return None,
+                Some(seconds) => seconds,
+                None => rate_limit_backoff_seconds(retry_count),
+            }
+        } else {
+            rate_limit_backoff_seconds(retry_count)
+        };
+
+        Some(Duration::from_secs(delay_seconds.min(max_wait_seconds)))
     }
 
     async fn record_success_result(
@@ -337,6 +375,7 @@ impl RequestForwarder {
         // 客户端错误：整流后请求仍违法，下一家也修不好 → 直接返回。
         let is_provider_error = match &retry_err {
             ProxyError::Timeout(_) | ProxyError::ForwardFailed(_) => true,
+            ProxyError::RateLimited { .. } => true,
             ProxyError::UpstreamError { status, .. } => *status >= 500,
             _ => false,
         };
@@ -525,20 +564,53 @@ impl RequestForwarder {
                 status.current_provider_id = Some(provider.id.clone());
             }
 
-            // 转发请求（每个 Provider 只尝试一次，重试由客户端控制）
-            match self
-                .forward(
-                    app_type,
-                    &method,
-                    provider,
-                    endpoint,
-                    &provider_body,
-                    &headers,
-                    &extensions,
-                    adapter.as_ref(),
-                )
-                .await
-            {
+            // HTTP 429 是上游暂时限流，而非 Provider 必然失效。按策略先在
+            // 同一 Provider 短暂重试；用尽本地预算或等待时间过长时，才进入
+            // 下方既有的熔断/故障转移逻辑。
+            let mut rate_limit_retries = 0;
+            let forward_result = loop {
+                let result = self
+                    .forward(
+                        app_type,
+                        &method,
+                        provider,
+                        endpoint,
+                        &provider_body,
+                        &headers,
+                        &extensions,
+                        adapter.as_ref(),
+                    )
+                    .await;
+
+                let retry_after_seconds = match &result {
+                    Err(ProxyError::RateLimited {
+                        retry_after_seconds,
+                        ..
+                    }) => *retry_after_seconds,
+                    _ => break result,
+                };
+
+                let Some(delay) =
+                    self.rate_limit_retry_delay(rate_limit_retries, retry_after_seconds)
+                else {
+                    break result;
+                };
+
+                rate_limit_retries += 1;
+                log::info!(
+                    "[{app_type_str}] 上游 HTTP 429，{:.1}s 后重试同一 Provider（{}/{}）：provider={}{}",
+                    delay.as_secs_f64(),
+                    rate_limit_retries,
+                    self.rate_limit_retry_config.max_retries,
+                    provider.name,
+                    retry_after_seconds
+                        .map(|seconds| format!(", Retry-After={seconds}s"))
+                        .unwrap_or_default(),
+                );
+                tokio::time::sleep(delay).await;
+            };
+
+            match forward_result {
                 Ok((response, claude_api_format, outbound_model)) => {
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
@@ -2417,6 +2489,15 @@ impl RequestForwarder {
             Ok((response, resolved_claude_api_format, outbound_model))
         } else {
             let status_code = status.as_u16();
+            let retry_after_seconds = (status_code == http::StatusCode::TOO_MANY_REQUESTS.as_u16())
+                .then(|| {
+                    response
+                        .headers()
+                        .get(http::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(parse_retry_after_seconds)
+                })
+                .flatten();
             // 错误响应同样可能被上游压缩（content-encoding）。reqwest 未启用任何
             // 自动解压 feature，这里拿到的是原始字节；不解压的话，压缩过的错误体会
             // 在 from_utf8 处变成非 UTF-8 而被丢弃，隐藏掉上游的限流/鉴权等详情。
@@ -2435,10 +2516,17 @@ impl RequestForwarder {
             };
             let body_text = String::from_utf8(decoded).ok();
 
-            Err(ProxyError::UpstreamError {
-                status: status_code,
-                body: body_text,
-            })
+            if status_code == http::StatusCode::TOO_MANY_REQUESTS.as_u16() {
+                Err(ProxyError::RateLimited {
+                    retry_after_seconds,
+                    body: body_text,
+                })
+            } else {
+                Err(ProxyError::UpstreamError {
+                    status: status_code,
+                    body: body_text,
+                })
+            }
         }
     }
 
@@ -2793,6 +2881,7 @@ impl RequestForwarder {
                 400 | 405 | 406 | 413 | 414 | 415 | 422 | 501 => ErrorCategory::NonRetryable,
                 _ => ErrorCategory::Retryable,
             },
+            ProxyError::RateLimited { .. } => ErrorCategory::Retryable,
             // Provider 级配置/转换问题：换一个 Provider 可能就能成功
             ProxyError::ConfigError(_) => ErrorCategory::Retryable,
             ProxyError::TransformError(_) => ErrorCategory::Retryable,
@@ -2810,6 +2899,7 @@ impl RequestForwarder {
 fn extract_error_message(error: &ProxyError) -> Option<String> {
     match error {
         ProxyError::UpstreamError { body, .. } => body.clone(),
+        ProxyError::RateLimited { body, .. } => body.clone(),
         _ => Some(error.to_string()),
     }
 }
@@ -2882,6 +2972,23 @@ fn summarize_proxy_error(error: &ProxyError) -> String {
                 None => format!("上游 HTTP {status}"),
             }
         }
+        ProxyError::RateLimited {
+            retry_after_seconds,
+            body,
+        } => {
+            let body_summary = body
+                .as_deref()
+                .map(summarize_upstream_body)
+                .filter(|summary| !summary.is_empty());
+            let retry_after = retry_after_seconds
+                .map(|seconds| format!("，Retry-After {seconds}s"))
+                .unwrap_or_default();
+
+            match body_summary {
+                Some(summary) => format!("上游 HTTP 429{retry_after}: {summary}"),
+                None => format!("上游 HTTP 429{retry_after}"),
+            }
+        }
         ProxyError::Timeout(message) => {
             format!("请求超时: {}", summarize_text_for_log(message, 180))
         }
@@ -2899,6 +3006,31 @@ fn summarize_proxy_error(error: &ProxyError) -> String {
         }
         _ => summarize_text_for_log(&error.to_string(), 180),
     }
+}
+
+fn rate_limit_backoff_seconds(retry_count: u32) -> u64 {
+    1_u64.checked_shl(retry_count.min(63)).unwrap_or(u64::MAX)
+}
+
+/// 解析 HTTP Retry-After，支持 delta-seconds 与 HTTP-date 两种标准格式。
+/// 过去的日期表示可立即重试，非法值则交由指数退避处理。
+fn parse_retry_after_seconds(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds);
+    }
+
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    Some(
+        retry_at
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or(Duration::ZERO)
+            .as_secs(),
+    )
 }
 
 fn summarize_upstream_body(body: &str) -> String {
@@ -3796,6 +3928,7 @@ mod tests {
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
+            rate_limit_retry_config: RateLimitRetryConfig::default(),
         }
     }
 
@@ -3830,6 +3963,64 @@ mod tests {
     #[test]
     fn single_provider_has_no_terminal_all_failed_log() {
         assert!(build_terminal_failure_log(1, 1, None).is_none());
+    }
+
+    #[test]
+    fn rate_limit_retry_uses_retry_after_within_user_cap() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+
+        assert_eq!(
+            forwarder
+                .rate_limit_retry_delay(0, Some(12))
+                .expect("retry should be allowed"),
+            Duration::from_secs(12)
+        );
+        assert!(
+            forwarder.rate_limit_retry_delay(0, Some(31)).is_none(),
+            "an excessive Retry-After should fail over immediately"
+        );
+    }
+
+    #[test]
+    fn rate_limit_retry_falls_back_to_bounded_exponential_backoff() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+
+        assert_eq!(
+            forwarder
+                .rate_limit_retry_delay(0, None)
+                .expect("first retry should be allowed"),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            forwarder
+                .rate_limit_retry_delay(1, None)
+                .expect("second retry should be allowed"),
+            Duration::from_secs(2)
+        );
+        assert!(forwarder.rate_limit_retry_delay(2, None).is_none());
+    }
+
+    #[test]
+    fn rate_limit_retry_can_ignore_retry_after() {
+        let mut forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        forwarder.rate_limit_retry_config.respect_retry_after = false;
+
+        assert_eq!(
+            forwarder
+                .rate_limit_retry_delay(0, Some(20))
+                .expect("retry should be allowed"),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn retry_after_parser_supports_seconds_and_http_dates() {
+        assert_eq!(parse_retry_after_seconds("7"), Some(7));
+        assert_eq!(parse_retry_after_seconds("invalid"), None);
+        assert_eq!(
+            parse_retry_after_seconds("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some(0)
+        );
     }
 
     #[test]

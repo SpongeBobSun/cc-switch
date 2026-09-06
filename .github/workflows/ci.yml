@@ -4,7 +4,11 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches:
+      - main
+      - "feature/**"
+      - "fix/**"
+      - "chore/**"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -56,8 +60,8 @@ jobs:
     name: Frontend Checks
     runs-on: ubuntu-latest
     needs: changes
-    # Pushes to main always run everything: they keep the caches that PRs restore from warm.
-    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
+    # Pushes to main always run everything to keep caches warm; other refs only run changed areas.
+    if: github.ref == 'refs/heads/main' || needs.changes.outputs.frontend == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -103,7 +107,7 @@ jobs:
     name: Backend Checks
     runs-on: ${{ matrix.os }}
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    if: github.ref == 'refs/heads/main' || needs.changes.outputs.backend == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -157,7 +161,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 45
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    if: github.ref == 'refs/heads/main' || needs.changes.outputs.backend == 'true'
     permissions:
       contents: read
     steps:

@@ -138,4 +138,8 @@ export interface AppProxyConfig {
   circuitTimeoutSeconds: number;
   circuitErrorRateThreshold: number;
   circuitMinRequests: number;
+  retryOnRateLimit: boolean;
+  rateLimitMaxRetries: number;
+  rateLimitMaxWaitSeconds: number;
+  rateLimitRespectRetryAfter: boolean;
 }

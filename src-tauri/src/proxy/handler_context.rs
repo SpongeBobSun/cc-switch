@@ -8,7 +8,10 @@ use crate::proxy::{
     extract_session_id,
     forwarder::RequestForwarder,
     server::ProxyState,
-    types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
+    types::{
+        AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RateLimitRetryConfig,
+        RectifierConfig,
+    },
     ProxyError,
 };
 use axum::http::HeaderMap;
@@ -241,6 +244,13 @@ impl RequestContext {
             self.optimizer_config.clone(),
             self.copilot_optimizer_config.clone(),
             max_retries,
+            RateLimitRetryConfig {
+                enabled: self.app_config.auto_failover_enabled
+                    && self.app_config.retry_on_rate_limit,
+                max_retries: self.app_config.rate_limit_max_retries,
+                max_wait_seconds: self.app_config.rate_limit_max_wait_seconds,
+                respect_retry_after: self.app_config.rate_limit_respect_retry_after,
+            },
         )
     }
 

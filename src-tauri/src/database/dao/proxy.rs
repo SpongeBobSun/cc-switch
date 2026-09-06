@@ -224,7 +224,9 @@ impl Database {
                 "SELECT app_type, enabled, auto_failover_enabled,
                         max_retries, streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                         circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
-                        circuit_error_rate_threshold, circuit_min_requests
+                        circuit_error_rate_threshold, circuit_min_requests,
+                        retry_on_rate_limit, rate_limit_max_retries, rate_limit_max_wait_seconds,
+                        rate_limit_respect_retry_after
                  FROM proxy_config WHERE app_type = ?1",
                 [app_type],
                 |row| {
@@ -241,6 +243,10 @@ impl Database {
                         circuit_timeout_seconds: row.get::<_, i32>(9)? as u32,
                         circuit_error_rate_threshold: row.get(10)?,
                         circuit_min_requests: row.get::<_, i32>(11)? as u32,
+                        retry_on_rate_limit: row.get::<_, i32>(12)? != 0,
+                        rate_limit_max_retries: row.get::<_, i32>(13)? as u32,
+                        rate_limit_max_wait_seconds: row.get::<_, i32>(14)? as u32,
+                        rate_limit_respect_retry_after: row.get::<_, i32>(15)? != 0,
                     })
                 },
             )
@@ -265,6 +271,10 @@ impl Database {
                     circuit_timeout_seconds: 60,
                     circuit_error_rate_threshold: 0.6,
                     circuit_min_requests: 10,
+                    retry_on_rate_limit: true,
+                    rate_limit_max_retries: 2,
+                    rate_limit_max_wait_seconds: 30,
+                    rate_limit_respect_retry_after: true,
                 })
             }
             Err(e) => Err(AppError::Database(e.to_string())),
@@ -291,6 +301,10 @@ impl Database {
                 circuit_timeout_seconds = ?10,
                 circuit_error_rate_threshold = ?11,
                 circuit_min_requests = ?12,
+                retry_on_rate_limit = ?13,
+                rate_limit_max_retries = ?14,
+                rate_limit_max_wait_seconds = ?15,
+                rate_limit_respect_retry_after = ?16,
                 updated_at = datetime('now')
              WHERE app_type = ?1",
             rusqlite::params![
@@ -306,6 +320,14 @@ impl Database {
                 config.circuit_timeout_seconds as i32,
                 config.circuit_error_rate_threshold,
                 config.circuit_min_requests as i32,
+                if config.retry_on_rate_limit { 1 } else { 0 },
+                config.rate_limit_max_retries as i32,
+                config.rate_limit_max_wait_seconds as i32,
+                if config.rate_limit_respect_retry_after {
+                    1
+                } else {
+                    0
+                },
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -976,6 +998,31 @@ mod tests {
                 ..
             }
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retry_settings_round_trip() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let mut config = db.get_proxy_config_for_app("codex").await?;
+
+        assert!(config.retry_on_rate_limit);
+        assert_eq!(config.rate_limit_max_retries, 2);
+        assert_eq!(config.rate_limit_max_wait_seconds, 30);
+        assert!(config.rate_limit_respect_retry_after);
+
+        config.retry_on_rate_limit = false;
+        config.rate_limit_max_retries = 4;
+        config.rate_limit_max_wait_seconds = 90;
+        config.rate_limit_respect_retry_after = false;
+        db.update_proxy_config_for_app(config).await?;
+
+        let saved = db.get_proxy_config_for_app("codex").await?;
+        assert!(!saved.retry_on_rate_limit);
+        assert_eq!(saved.rate_limit_max_retries, 4);
+        assert_eq!(saved.rate_limit_max_wait_seconds, 90);
+        assert!(!saved.rate_limit_respect_retry_after);
 
         Ok(())
     }

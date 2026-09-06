@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="fork-badge" x1="350" y1="350" x2="480" y2="482" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0F766E"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+    <filter id="badge-shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#0F172A" flood-opacity="0.34"/>
+    </filter>
+  </defs>
+
+  <image href="upstream-icon.png" width="512" height="512"/>
+
+  <g filter="url(#badge-shadow)">
+    <circle cx="416" cy="416" r="68" fill="url(#fork-badge)" stroke="#FFFFFF" stroke-width="6"/>
+    <g transform="translate(362 362) scale(4.5)" fill="none" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2">
+      <circle cx="12" cy="18" r="3"/>
+      <circle cx="6" cy="6" r="3"/>
+      <circle cx="18" cy="6" r="3"/>
+      <path d="M18 9v2a4 4 0 0 1-4 4h-4a4 4 0 0 0-4 4v2"/>
+    </g>
+  </g>
+</svg>

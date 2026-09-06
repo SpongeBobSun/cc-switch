@@ -1,0 +1,104 @@
+name: Build macOS universal (unsigned)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-macos-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: macOS universal unsigned build
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS build targets
+        shell: bash
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Setup pnpm
+        shell: bash
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          node --version
+          pnpm --version
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: macos-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: macos-pnpm-store-
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: macos-cargo-universal-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: macos-cargo-universal-
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned universal Tauri app
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Do not provide Apple or Tauri signing credentials. Updater artifacts
+          # are disabled because they require a Tauri signing key.
+          pnpm tauri build --ci \
+            --target universal-apple-darwin \
+            --bundles app \
+            --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Package macOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos \
+            -maxdepth 1 -type d -name '*.app' -print -quit)
+          if [ -z "$app_path" ]; then
+            echo "No macOS .app bundle was produced" >&2
+            exit 1
+          fi
+
+          artifact_dir=macos-artifacts
+          archive_name=CC-Switch-SpongeBobSun-macOS-universal-unsigned.zip
+          mkdir -p "$artifact_dir"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$artifact_dir/$archive_name"
+          ls -lh "$artifact_dir/$archive_name"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-switch-spongebobsun-macos-universal-unsigned-${{ github.sha }}
+          path: macos-artifacts/*
+          if-no-files-found: error
+          retention-days: 14

@@ -24,6 +24,7 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
 
         // 上游错误：使用实际状态码
         ProxyError::UpstreamError { status, .. } => *status,
+        ProxyError::RateLimited { .. } => 429,
 
         // 超时错误：504 Gateway Timeout
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => 504,
@@ -73,6 +74,13 @@ pub fn get_error_message(error: &ProxyError) -> String {
                 format!("上游错误 ({status})")
             }
         }
+        ProxyError::RateLimited { body, .. } => {
+            if let Some(body) = body {
+                format!("上游请求过于频繁 (429): {body}")
+            } else {
+                "上游请求过于频繁 (429)".to_string()
+            }
+        }
         ProxyError::Timeout(msg) => format!("请求超时: {msg}"),
         ProxyError::ForwardFailed(msg) => format!("转发失败: {msg}"),
         ProxyError::NoAvailableProvider => "无可用 Provider".to_string(),
@@ -97,6 +105,16 @@ mod tests {
             body: Some("Unauthorized".to_string()),
         };
         assert_eq!(map_proxy_error_to_status(&error), 401);
+    }
+
+    #[test]
+    fn test_map_rate_limited_error() {
+        let error = ProxyError::RateLimited {
+            retry_after_seconds: Some(5),
+            body: Some("Too many requests".to_string()),
+        };
+        assert_eq!(map_proxy_error_to_status(&error), 429);
+        assert!(get_error_message(&error).contains("429"));
     }
 
     #[test]

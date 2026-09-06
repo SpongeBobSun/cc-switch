@@ -1021,8 +1021,11 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
             }
         }
         "open_website" => {
-            if let Err(e) = app.opener().open_url("https://ccswitch.io", None::<String>) {
-                log::error!("打开官方网站失败: {e}");
+            if let Err(e) = app
+                .opener()
+                .open_url("https://github.com/SpongeBobSun/cc-switch", None::<String>)
+            {
+                log::error!("打开项目主页失败: {e}");
             }
         }
         "lightweight_mode" => {

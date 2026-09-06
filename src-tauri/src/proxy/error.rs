@@ -45,6 +45,14 @@ pub enum ProxyError {
     #[error("上游错误 (状态码 {status}): {body:?}")]
     UpstreamError { status: u16, body: Option<String> },
 
+    /// 上游返回 HTTP 429，保留解析后的 Retry-After 以便转发器决定是否在
+    /// 同一 Provider 上短暂等待后重试。
+    #[error("上游请求过于频繁 (HTTP 429): {body:?}")]
+    RateLimited {
+        retry_after_seconds: Option<u64>,
+        body: Option<String>,
+    },
+
     #[error("超过最大重试次数")]
     MaxRetriesExceeded,
 
@@ -85,34 +93,9 @@ impl IntoResponse for ProxyError {
             ProxyError::UpstreamError {
                 status: upstream_status,
                 body: upstream_body,
-            } => {
-                let http_status =
-                    StatusCode::from_u16(*upstream_status).unwrap_or(StatusCode::BAD_GATEWAY);
-
-                // 尝试解析上游响应体为 JSON，如果失败则包装为字符串
-                let error_body = if let Some(body_str) = upstream_body {
-                    if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
-                        // 上游返回的是 JSON，直接透传
-                        json_body
-                    } else {
-                        // 上游返回的不是 JSON，包装为错误消息
-                        json!({
-                            "error": {
-                                "message": body_str,
-                                "type": "upstream_error",
-                            }
-                        })
-                    }
-                } else {
-                    json!({
-                        "error": {
-                            "message": format!("Upstream error (status {})", upstream_status),
-                            "type": "upstream_error",
-                        }
-                    })
-                };
-
-                (http_status, error_body)
+            } => upstream_error_response(*upstream_status, upstream_body.as_deref()),
+            ProxyError::RateLimited { body, .. } => {
+                upstream_error_response(StatusCode::TOO_MANY_REQUESTS.as_u16(), body.as_deref())
             }
             _ => {
                 let (http_status, message) = match &self {
@@ -162,7 +145,9 @@ impl IntoResponse for ProxyError {
                     ProxyError::ResponseBodyTooLarge(_) => {
                         (StatusCode::BAD_GATEWAY, self.to_string())
                     }
-                    ProxyError::UpstreamError { .. } => unreachable!(),
+                    ProxyError::UpstreamError { .. } | ProxyError::RateLimited { .. } => {
+                        unreachable!()
+                    }
                 };
 
                 let error_body = json!({
@@ -178,6 +163,36 @@ impl IntoResponse for ProxyError {
 
         (status, Json(body)).into_response()
     }
+}
+
+fn upstream_error_response(
+    upstream_status: u16,
+    upstream_body: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let http_status = StatusCode::from_u16(upstream_status).unwrap_or(StatusCode::BAD_GATEWAY);
+
+    // 尝试解析上游响应体为 JSON，如果失败则包装为字符串。
+    let error_body = if let Some(body_str) = upstream_body {
+        if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
+            json_body
+        } else {
+            json!({
+                "error": {
+                    "message": body_str,
+                    "type": "upstream_error",
+                }
+            })
+        }
+    } else {
+        json!({
+            "error": {
+                "message": format!("Upstream error (status {})", upstream_status),
+                "type": "upstream_error",
+            }
+        })
+    };
+
+    (http_status, error_body)
 }
 
 /// 错误分类

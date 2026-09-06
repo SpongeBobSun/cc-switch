@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=CC Switch SpongeBobSun
+Name=CC Switch Relay
 Comment=All-in-One Assistant for Claude Code, Codex & Gemini CLI
 Exec=cc-switch
 Icon=io.github.spongebobsun.ccswitch

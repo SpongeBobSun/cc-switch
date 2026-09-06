@@ -322,16 +322,16 @@ jobs:
           DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
           rm -rf "$DMG_STAGE_DIR"
           mkdir -p "$DMG_STAGE_DIR"
-          ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch SpongeBobSun.app"
+          ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch Relay.app"
 
           create-dmg \
-            --volname "CC Switch SpongeBobSun" \
+            --volname "CC Switch Relay" \
             --background "src-tauri/icons/dmg-background.png" \
             --window-size 660 400 \
             --window-pos 200 120 \
             --icon-size 80 \
-            --icon "CC Switch SpongeBobSun.app" 180 220 \
-            --hide-extension "CC Switch SpongeBobSun.app" \
+            --icon "CC Switch Relay.app" 180 220 \
+            --hide-extension "CC Switch Relay.app" \
             --app-drop-link 480 220 \
             --codesign "$APPLE_SIGNING_IDENTITY" \
             --no-internet-enable \
@@ -600,10 +600,10 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          name: CC Switch SpongeBobSun ${{ github.ref_name }}
+          name: CC Switch Relay ${{ github.ref_name }}
           prerelease: true
           body: |
-            ## CC Switch SpongeBobSun ${{ github.ref_name }}
+            ## CC Switch Relay ${{ github.ref_name }}
 
             Source: [SpongeBobSun/cc-switch](https://github.com/SpongeBobSun/cc-switch)
 

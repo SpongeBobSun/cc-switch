@@ -23,7 +23,7 @@ describe("RoutingActivationBrand", () => {
       screen.getByTestId("routing-activation-particles"),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: "CC Switch SpongeBobSun" }),
+      screen.getByRole("link", { name: "CC Switch Relay" }),
     ).toHaveClass("text-emerald-500");
 
     act(() => {

@@ -190,6 +190,8 @@ pub struct AppProxyConfig {
     pub rate_limit_max_retries: u32,
     /// 单次 429 等待的最大秒数，超过时直接交给故障转移
     pub rate_limit_max_wait_seconds: u32,
+    /// 单次客户端请求中所有 Provider 的 429 累计等待上限（秒）
+    pub rate_limit_total_wait_seconds: u32,
     /// 是否优先遵守上游的 Retry-After 响应头
     pub rate_limit_respect_retry_after: bool,
 }
@@ -203,6 +205,7 @@ pub struct RateLimitRetryConfig {
     pub enabled: bool,
     pub max_retries: u32,
     pub max_wait_seconds: u32,
+    pub total_wait_seconds: u32,
     pub respect_retry_after: bool,
 }
 
@@ -210,8 +213,9 @@ impl Default for RateLimitRetryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_retries: 2,
-            max_wait_seconds: 30,
+            max_retries: 3,
+            max_wait_seconds: 60,
+            total_wait_seconds: 60,
             respect_retry_after: true,
         }
     }

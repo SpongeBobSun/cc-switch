@@ -41,8 +41,9 @@ export function AutoFailoverConfigPanel({
     circuitErrorRateThreshold: "50", // 存储百分比值
     circuitMinRequests: "10",
     retryOnRateLimit: true,
-    rateLimitMaxRetries: "2",
-    rateLimitMaxWaitSeconds: "30",
+    rateLimitMaxRetries: "3",
+    rateLimitMaxWaitSeconds: "60",
+    rateLimitTotalWaitSeconds: "60",
     rateLimitRespectRetryAfter: true,
   });
 
@@ -64,6 +65,7 @@ export function AutoFailoverConfigPanel({
         retryOnRateLimit: config.retryOnRateLimit,
         rateLimitMaxRetries: String(config.rateLimitMaxRetries),
         rateLimitMaxWaitSeconds: String(config.rateLimitMaxWaitSeconds),
+        rateLimitTotalWaitSeconds: String(config.rateLimitTotalWaitSeconds),
         rateLimitRespectRetryAfter: config.rateLimitRespectRetryAfter,
       });
     }
@@ -92,6 +94,7 @@ export function AutoFailoverConfigPanel({
       circuitMinRequests: { min: 5, max: 100 },
       rateLimitMaxRetries: { min: 0, max: 5 },
       rateLimitMaxWaitSeconds: { min: 1, max: 300 },
+      rateLimitTotalWaitSeconds: { min: 1, max: 600 },
     };
 
     // 解析原始值
@@ -107,6 +110,7 @@ export function AutoFailoverConfigPanel({
       circuitMinRequests: parseNum(formData.circuitMinRequests),
       rateLimitMaxRetries: parseNum(formData.rateLimitMaxRetries),
       rateLimitMaxWaitSeconds: parseNum(formData.rateLimitMaxWaitSeconds),
+      rateLimitTotalWaitSeconds: parseNum(formData.rateLimitTotalWaitSeconds),
     };
 
     // 校验是否超出范围（NaN 也视为无效）
@@ -177,6 +181,11 @@ export function AutoFailoverConfigPanel({
         ranges.rateLimitMaxWaitSeconds,
         t("proxy.autoFailover.rateLimitMaxWait", "429 最大等待时间"),
       );
+      checkRange(
+        raw.rateLimitTotalWaitSeconds,
+        ranges.rateLimitTotalWaitSeconds,
+        t("proxy.autoFailover.rateLimitTotalWait", "429 累计等待上限"),
+      );
     }
 
     if (errors.length > 0) {
@@ -206,6 +215,7 @@ export function AutoFailoverConfigPanel({
         retryOnRateLimit: formData.retryOnRateLimit,
         rateLimitMaxRetries: raw.rateLimitMaxRetries,
         rateLimitMaxWaitSeconds: raw.rateLimitMaxWaitSeconds,
+        rateLimitTotalWaitSeconds: raw.rateLimitTotalWaitSeconds,
         rateLimitRespectRetryAfter: formData.rateLimitRespectRetryAfter,
       });
       toast.success(
@@ -237,6 +247,7 @@ export function AutoFailoverConfigPanel({
         retryOnRateLimit: config.retryOnRateLimit,
         rateLimitMaxRetries: String(config.rateLimitMaxRetries),
         rateLimitMaxWaitSeconds: String(config.rateLimitMaxWaitSeconds),
+        rateLimitTotalWaitSeconds: String(config.rateLimitTotalWaitSeconds),
         rateLimitRespectRetryAfter: config.rateLimitRespectRetryAfter,
       });
     }
@@ -327,7 +338,7 @@ export function AutoFailoverConfigPanel({
                 />
               </div>
 
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div className="space-y-2">
                   <Label htmlFor={`rateLimitMaxRetries-${appType}`}>
                     {t(
@@ -352,7 +363,7 @@ export function AutoFailoverConfigPanel({
                   <p className="text-xs text-muted-foreground">
                     {t(
                       "proxy.autoFailover.rateLimitMaxRetriesHint",
-                      "429 后在当前供应商重发请求的次数（0-5）",
+                      "429 后在当前供应商重发请求的次数（0-5，默认 3 次）",
                     )}
                   </p>
                 </div>
@@ -381,7 +392,36 @@ export function AutoFailoverConfigPanel({
                   <p className="text-xs text-muted-foreground">
                     {t(
                       "proxy.autoFailover.rateLimitMaxWaitHint",
-                      "上游要求等待更久时，立即改走下一个供应商（1-300 秒）",
+                      "上游要求等待更久时，立即改走下一个供应商（1-300 秒，默认 60 秒）",
+                    )}
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor={`rateLimitTotalWait-${appType}`}>
+                    {t(
+                      "proxy.autoFailover.rateLimitTotalWait",
+                      "本次请求累计等待上限（秒）",
+                    )}
+                  </Label>
+                  <Input
+                    id={`rateLimitTotalWait-${appType}`}
+                    type="number"
+                    min="1"
+                    max="600"
+                    value={formData.rateLimitTotalWaitSeconds}
+                    onChange={(event) =>
+                      setFormData({
+                        ...formData,
+                        rateLimitTotalWaitSeconds: event.target.value,
+                      })
+                    }
+                    disabled={rateLimitInputsDisabled}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      "proxy.autoFailover.rateLimitTotalWaitHint",
+                      "所有容灾供应商共享此等待预算，耗尽后继续故障转移（1-600 秒，默认 60 秒）",
                     )}
                   </p>
                 </div>
@@ -398,7 +438,7 @@ export function AutoFailoverConfigPanel({
                   <p className="text-xs text-muted-foreground">
                     {t(
                       "proxy.autoFailover.respectRetryAfterHint",
-                      "未提供或格式无效时使用 1 秒、2 秒的退避等待",
+                      "未提供或格式无效时使用约 2 秒、4 秒、8 秒的带抖动退避等待",
                     )}
                   </p>
                 </div>

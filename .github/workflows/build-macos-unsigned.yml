@@ -90,7 +90,7 @@ jobs:
           fi
 
           artifact_dir=macos-artifacts
-          archive_name=CC-Switch-SpongeBobSun-macOS-universal-unsigned.zip
+          archive_name=CC-Switch-Relay-macOS-universal-unsigned.zip
           mkdir -p "$artifact_dir"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "$artifact_dir/$archive_name"
           ls -lh "$artifact_dir/$archive_name"
@@ -98,7 +98,7 @@ jobs:
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cc-switch-spongebobsun-macos-universal-unsigned-${{ github.sha }}
+          name: cc-switch-relay-macos-universal-unsigned-${{ github.sha }}
           path: macos-artifacts/*
           if-no-files-found: error
           retention-days: 14

@@ -122,7 +122,7 @@ export function RoutingActivationBrand({
             : { duration: 0.28, ease: [0.22, 1, 0.36, 1] }
         }
       >
-        CC Switch SpongeBobSun
+        CC Switch Relay
       </motion.a>
 
       {showBurst && (

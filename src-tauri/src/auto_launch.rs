@@ -2,8 +2,8 @@ use crate::error::AppError;
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 
 /// 获取 macOS 上的 .app bundle 路径
-/// 将 `/path/to/CC Switch SpongeBobSun.app/Contents/MacOS/CC Switch SpongeBobSun`
-/// 转换为 `/path/to/CC Switch SpongeBobSun.app`
+/// 将 `/path/to/CC Switch Relay.app/Contents/MacOS/CC Switch Relay`
+/// 转换为 `/path/to/CC Switch Relay.app`
 #[cfg(target_os = "macos")]
 fn get_macos_app_bundle_path(exe_path: &std::path::Path) -> Option<std::path::PathBuf> {
     let path_str = exe_path.to_string_lossy();
@@ -18,7 +18,7 @@ fn get_macos_app_bundle_path(exe_path: &std::path::Path) -> Option<std::path::Pa
 
 /// 初始化 AutoLaunch 实例
 fn get_auto_launch() -> Result<AutoLaunch, AppError> {
-    let app_name = "CC Switch SpongeBobSun";
+    let app_name = "CC Switch Relay";
     let exe_path =
         std::env::current_exe().map_err(|e| AppError::Message(format!("无法获取应用路径: {e}")))?;
 
@@ -78,13 +78,13 @@ mod tests {
     #[test]
     fn test_get_macos_app_bundle_path_valid() {
         let exe_path = std::path::Path::new(
-            "/Applications/CC Switch SpongeBobSun.app/Contents/MacOS/CC Switch SpongeBobSun",
+            "/Applications/CC Switch Relay.app/Contents/MacOS/CC Switch Relay",
         );
         let result = get_macos_app_bundle_path(exe_path);
         assert_eq!(
             result,
             Some(std::path::PathBuf::from(
-                "/Applications/CC Switch SpongeBobSun.app",
+                "/Applications/CC Switch Relay.app",
             ))
         );
     }
@@ -93,13 +93,13 @@ mod tests {
     #[test]
     fn test_get_macos_app_bundle_path_with_spaces() {
         let exe_path = std::path::Path::new(
-            "/Users/test/My Apps/CC Switch SpongeBobSun.app/Contents/MacOS/CC Switch SpongeBobSun",
+            "/Users/test/My Apps/CC Switch Relay.app/Contents/MacOS/CC Switch Relay",
         );
         let result = get_macos_app_bundle_path(exe_path);
         assert_eq!(
             result,
             Some(std::path::PathBuf::from(
-                "/Users/test/My Apps/CC Switch SpongeBobSun.app"
+                "/Users/test/My Apps/CC Switch Relay.app"
             ))
         );
     }

@@ -15,17 +15,22 @@ use super::{
         codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore, get_adapter,
         AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
     },
+    semantic_detector::{ProbeDecision, ResponseProbe},
     semantic_error,
+    semantic_guard::{self, SemanticAction, SemanticGuard, SemanticOutcome},
     thinking_budget_rectifier::{rectify_thinking_budget, should_rectify_thinking_budget},
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
     },
     types::{
-        CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RateLimitRetryConfig, RectifierConfig,
+        CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RateLimitRetryConfig,
+        RectifierConfig, SemanticProbeConfig,
     },
     ProxyError,
 };
 use crate::commands::{CodexOAuthState, CopilotAuthState, XaiOAuthState};
+use crate::database::dao::semantic_audit::SemanticDegradationEvent;
+use crate::database::Database;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::{
@@ -196,6 +201,12 @@ pub struct RequestForwarder {
     max_attempts: usize,
     /// 上游 HTTP 429 的同 Provider 重试策略。
     rate_limit_retry_config: RateLimitRetryConfig,
+    /// 用于落库语义降级审计事件。
+    db: Arc<Database>,
+    /// Responses 语义探针 / 重放 / 独立熔断配置。
+    semantic: SemanticProbeConfig,
+    /// 独立语义熔断器（跨请求共享，与传输层熔断器分离）。
+    semantic_guard: Arc<SemanticGuard>,
 }
 
 impl RequestForwarder {
@@ -264,6 +275,9 @@ impl RequestForwarder {
         copilot_optimizer_config: CopilotOptimizerConfig,
         max_retries: u32,
         rate_limit_retry_config: RateLimitRetryConfig,
+        db: Arc<Database>,
+        semantic: SemanticProbeConfig,
+        semantic_guard: Arc<SemanticGuard>,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
@@ -288,6 +302,9 @@ impl RequestForwarder {
             ),
             max_attempts,
             rate_limit_retry_config,
+            db,
+            semantic,
+            semantic_guard,
         }
     }
 
@@ -360,6 +377,41 @@ impl RequestForwarder {
                 );
             }
         });
+    }
+
+    /// 落库一条 Responses 语义降级审计事件。落库失败只记 warning，
+    /// 绝不影响代理请求路径。
+    #[allow(clippy::too_many_arguments)]
+    fn audit_semantic_degradation(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        endpoint: &str,
+        request_id: Option<String>,
+        evidence: Vec<String>,
+        attempts: u32,
+        replayed: bool,
+        outcome: SemanticOutcome,
+        dry_run: bool,
+        tier: &str,
+        detail: Option<String>,
+    ) {
+        let event = SemanticDegradationEvent {
+            request_id,
+            app_type: app_type.to_string(),
+            provider_id: provider.id.clone(),
+            endpoint: Some(endpoint.split('?').next().unwrap_or(endpoint).to_string()),
+            tier: tier.to_string(),
+            evidence,
+            attempts,
+            replayed,
+            outcome: outcome.as_str().to_string(),
+            dry_run,
+            detail,
+        };
+        if let Err(error) = self.db.insert_semantic_degradation_event(&event) {
+            log::warn!("[SEMA-005] 落库语义降级事件失败: {error}");
+        }
     }
 
     /// 整流（thinking signature 或 budget）重试失败后的统一收尾。
@@ -546,6 +598,20 @@ impl RequestForwarder {
                 continue;
             }
 
+            // 独立的语义熔断：HTTP 200 的降级渠道不会进入传输层熔断器，
+            // 这里单独跳过近期反复语义降级的目标。单 Provider 场景下不跳过，
+            // 否则会把「可用但降级」的渠道变成完全不可用。
+            if !bypass_circuit_breaker && self.semantic.enabled {
+                let key = semantic_guard::circuit_key(app_type_str, &provider.id, Some(endpoint));
+                if !self.semantic_guard.allow(&key, std::time::Instant::now()) {
+                    log::warn!(
+                        "[SEMA-003] 语义熔断已打开，跳过 provider={} ({key})",
+                        provider.id
+                    );
+                    continue;
+                }
+            }
+
             // PRE-SEND 优化器：每个 provider 独立决定是否优化
             // clone body 以避免 Bedrock 优化字段泄漏到非 Bedrock provider（failover 场景）
             let mut provider_body =
@@ -579,6 +645,13 @@ impl RequestForwarder {
             // 同一 Provider 短暂重试；用尽本地预算或等待时间过长时，才进入
             // 下方既有的熔断/故障转移逻辑。
             let mut rate_limit_retries = 0;
+            // Number of *semantic* replays already performed for this target.
+            // Deliberately not a shared send counter: HTTP 429 retries must not
+            // consume the semantic replay budget. `attempts_done = semantic_replays + 1`.
+            let mut semantic_replays = 0u32;
+            let mut pending_degradation: Option<(Vec<String>, Option<String>)> = None;
+            let semantic_key =
+                semantic_guard::circuit_key(app_type_str, &provider.id, Some(endpoint));
             let forward_result = loop {
                 let result = self
                     .forward(
@@ -593,41 +666,163 @@ impl RequestForwarder {
                     )
                     .await;
 
-                let retry_after_seconds = match &result {
+                match &result {
                     Err(ProxyError::RateLimited {
                         retry_after_seconds,
                         ..
-                    }) => *retry_after_seconds,
+                    }) => {
+                        let Some(delay) = self.rate_limit_retry_delay(
+                            rate_limit_retries,
+                            *retry_after_seconds,
+                            rate_limit_waited,
+                        ) else {
+                            break result;
+                        };
+
+                        rate_limit_retries += 1;
+                        rate_limit_waited = rate_limit_waited.saturating_add(delay);
+                        log::info!(
+                            "[{app_type_str}] 上游 HTTP 429，{:.1}s 后重试同一 Provider（{}/{}，累计等待 {:.1}/{:.1}s）：provider={}{}",
+                            delay.as_secs_f64(),
+                            rate_limit_retries,
+                            self.rate_limit_retry_config.max_retries,
+                            rate_limit_waited.as_secs_f64(),
+                            self.rate_limit_retry_config.total_wait_seconds,
+                            provider.name,
+                            retry_after_seconds
+                                .map(|seconds| format!(", Retry-After={seconds}s"))
+                                .unwrap_or_default(),
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    // Tier A semantic degradation: the upstream answered HTTP
+                    // 200 but routed the request to a channel without Responses
+                    // tool support. No client byte has been written yet, so a
+                    // bounded, cache-preserving replay is safe. This counter is
+                    // deliberately independent from rate_limit_retries and from
+                    // the transport-level circuit breaker.
+                    Err(ProxyError::SemanticDegraded {
+                        evidence,
+                        request_id,
+                    }) => {
+                        let evidence = evidence.clone();
+                        let request_id = request_id.clone();
+                        let now = std::time::Instant::now();
+
+                        if !self.semantic_guard.allow(&semantic_key, now) {
+                            self.audit_semantic_degradation(
+                                app_type_str,
+                                provider,
+                                endpoint,
+                                request_id.clone(),
+                                evidence.clone(),
+                                semantic_replays + 1,
+                                false,
+                                SemanticOutcome::CircuitOpen,
+                                false,
+                                "A",
+                                Some("semantic circuit open".to_string()),
+                            );
+                            log::warn!(
+                                "[SEMA-003] 语义熔断已打开，放弃重放: provider={}, key={}, sends={}",
+                                provider.id,
+                                semantic_key,
+                                semantic_replays + 1,
+                            );
+                            break result;
+                        }
+
+                        match semantic_guard::plan_next_attempt(
+                            semantic_replays + 1,
+                            self.semantic.max_attempts(),
+                        ) {
+                            SemanticAction::GiveUp => {
+                                // Only count a semantic failure once replay is
+                                // exhausted, so one misclassification cannot trip
+                                // the circuit for a healthy target.
+                                let opened = self.semantic_guard.record_failure(
+                                    &semantic_key,
+                                    &self.semantic,
+                                    now,
+                                );
+                                self.audit_semantic_degradation(
+                                    app_type_str,
+                                    provider,
+                                    endpoint,
+                                    request_id.clone(),
+                                    evidence.clone(),
+                                    semantic_replays + 1,
+                                    pending_degradation.is_some(),
+                                    SemanticOutcome::Exhausted,
+                                    false,
+                                    "A",
+                                    Some(format!("semantic_circuit_opened={opened}")),
+                                );
+                                log::warn!(
+                                    "[SEMA-002] Responses 语义降级未被重放修复: provider={}, endpoint={}, request_id={:?}, evidence={:?}, sends={}, circuit_opened={}",
+                                    provider.id,
+                                    endpoint,
+                                    request_id,
+                                    evidence,
+                                    semantic_replays + 1,
+                                    opened,
+                                );
+                                break result;
+                            }
+                            action => {
+                                let perturbed = if action == SemanticAction::RetryPerturbed {
+                                    semantic_guard::perturb_prompt_cache_key(
+                                        &mut provider_body,
+                                        SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .map(|elapsed| elapsed.as_nanos() as u64)
+                                            .unwrap_or(0),
+                                    )
+                                } else {
+                                    None
+                                };
+                                pending_degradation = Some((evidence, request_id));
+                                semantic_replays += 1;
+                                log::warn!(
+                                    "[SEMA-001] Responses 语义降级，安全重放 {}/{}: provider={}, endpoint={}, perturbed_cache_key={}",
+                                    semantic_replays + 1,
+                                    self.semantic.max_attempts(),
+                                    provider.id,
+                                    endpoint,
+                                    perturbed.is_some(),
+                                );
+                            }
+                        }
+                    }
                     _ => break result,
-                };
-
-                let Some(delay) = self.rate_limit_retry_delay(
-                    rate_limit_retries,
-                    retry_after_seconds,
-                    rate_limit_waited,
-                ) else {
-                    break result;
-                };
-
-                rate_limit_retries += 1;
-                rate_limit_waited = rate_limit_waited.saturating_add(delay);
-                log::info!(
-                    "[{app_type_str}] 上游 HTTP 429，{:.1}s 后重试同一 Provider（{}/{}，累计等待 {:.1}/{:.1}s）：provider={}{}",
-                    delay.as_secs_f64(),
-                    rate_limit_retries,
-                    self.rate_limit_retry_config.max_retries,
-                    rate_limit_waited.as_secs_f64(),
-                    self.rate_limit_retry_config.total_wait_seconds,
-                    provider.name,
-                    retry_after_seconds
-                        .map(|seconds| format!(", Retry-After={seconds}s"))
-                        .unwrap_or_default(),
-                );
-                tokio::time::sleep(delay).await;
+                }
             };
 
             match forward_result {
                 Ok((response, claude_api_format, outbound_model)) => {
+                    // A healthy send clears the independent semantic window.
+                    self.semantic_guard.record_success(&semantic_key);
+                    if let Some((evidence, request_id)) = pending_degradation.take() {
+                        self.audit_semantic_degradation(
+                            app_type_str,
+                            provider,
+                            endpoint,
+                            request_id,
+                            evidence,
+                            semantic_replays + 1,
+                            true,
+                            SemanticOutcome::Recovered,
+                            false,
+                            "A",
+                            None,
+                        );
+                        log::warn!(
+                            "[SEMA-004] 语义重放成功恢复: provider={}, endpoint={}, sends={}",
+                            provider.id,
+                            endpoint,
+                            semantic_replays + 1,
+                        );
+                    }
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
                     self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
@@ -680,6 +875,33 @@ impl RequestForwarder {
                     });
                 }
                 Err(e) => {
+                    // 语义降级有自己的计数器与熔断器，绝不能进入传输层熔断器或
+                    // Provider 健康度：HTTP 状态是 200，从传输层看这个端点是健康的。
+                    // 重放预算用尽后转入故障转移，但保持传输层健康分不受污染。
+                    if matches!(e, ProxyError::SemanticDegraded { .. }) {
+                        self.router
+                            .release_permit_neutral(
+                                &provider.id,
+                                app_type_str,
+                                used_half_open_permit,
+                            )
+                            .await;
+                        {
+                            let mut status = self.status.write().await;
+                            status.last_error = Some(format!(
+                                "Provider {} 语义降级(Responses 工具协议不可用)",
+                                provider.name
+                            ));
+                        }
+                        log::warn!(
+                            "[{app_type_str}] [SEMA-002] provider={} 语义降级且重放预算已用尽，转入故障转移（不计入传输层熔断器）",
+                            provider.name
+                        );
+                        last_error = Some(e);
+                        last_provider = Some(provider.clone());
+                        continue;
+                    }
+
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）
                     let provider_type = ProviderType::from_app_type_and_config(app_type, provider);
                     let is_anthropic_provider = matches!(
@@ -1286,6 +1508,14 @@ impl RequestForwarder {
             && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
         let codex_responses_to_anthropic = matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint);
+        // Native Codex Responses (no chat/anthropic conversion) speaks the
+        // Responses protocol directly, so it needs the same Tier A semantic probe
+        // as the Claude→Responses path. This is the exact shape of the reported
+        // failure: Codex CLI → cc-switch → aggregator `openai_responses` channel.
+        let codex_responses_native = matches!(app_type, AppType::Codex | AppType::GrokBuild)
+            && !codex_responses_to_chat
+            && !codex_responses_to_anthropic
+            && endpoint.contains("responses");
         let codex_official_auth_passthrough = matches!(app_type, AppType::Codex)
             && super::providers::is_codex_official_provider(provider);
 
@@ -2494,7 +2724,8 @@ impl RequestForwarder {
             if matches!(
                 resolved_claude_api_format.as_deref(),
                 Some("openai_responses")
-            ) {
+            ) || codex_responses_native
+            {
                 if !request_is_streaming || response.is_json() {
                     // Claude→Responses gateways can also return a semantic failure in an
                     // HTTP 2xx Response object. Validate buffered/JSON bodies inside the
@@ -2504,7 +2735,15 @@ impl RequestForwarder {
                     // Delay committing the downstream stream until the upstream emits
                     // either productive output or a valid non-failure terminal event.
                     // A response.failed/error before output remains failover-safe.
-                    response = self.validate_responses_stream_start(response).await?;
+                    response = self
+                        .validate_responses_stream_start(
+                            response,
+                            app_type.as_str(),
+                            provider,
+                            endpoint,
+                            codex_responses_native,
+                        )
+                        .await?;
                 }
             }
             if self.max_attempts > 1 {
@@ -2662,6 +2901,13 @@ impl RequestForwarder {
     async fn validate_responses_stream_start(
         &self,
         response: ProxyResponse,
+        app_type_str: &str,
+        provider: &Provider,
+        endpoint: &str,
+        // Native Codex Responses already streamed `response.created` to the
+        // client before this probe existed. Once the probe closes healthy, commit
+        // immediately so healthy streams keep their original first-byte latency.
+        commit_on_probe_pass: bool,
     ) -> Result<ProxyResponse, ProxyError> {
         const MAX_PRIME_BYTES: usize = 256 * 1024;
 
@@ -2672,18 +2918,53 @@ impl RequestForwarder {
         let mut parse_buffer = String::new();
         let mut utf8_remainder = Vec::new();
 
+        // Tier A probe state. It only inspects identifier shapes and only until
+        // the first productive event or the bounded window closes. When replay
+        // is disabled this stays in observe-only (dry-run) mode.
+        let mut probe = ResponseProbe::new();
+        let mut probe_closed = !self.semantic.enabled;
+        let probe_deadline = tokio::time::Instant::now() + self.semantic.window();
+
         loop {
-            let next = if self.streaming_first_byte_timeout.is_zero() {
-                stream.next().await
-            } else {
-                tokio::time::timeout(self.streaming_first_byte_timeout, stream.next())
-                    .await
-                    .map_err(|_| {
-                        ProxyError::Timeout(format!(
-                            "Responses stream produced no semantic output within {}s",
-                            self.streaming_first_byte_timeout.as_secs()
-                        ))
-                    })?
+            // Effective wait deadline is the earlier of the (optional) first-byte
+            // timeout and the Tier A semantic window. When only the semantic
+            // window fires we stop probing and keep waiting for the stream
+            // instead of failing the attempt: the bounded window must never turn
+            // a slow-but-healthy upstream into a timeout.
+            let next = {
+                let first_byte_deadline = if self.streaming_first_byte_timeout.is_zero() {
+                    None
+                } else {
+                    Some(tokio::time::Instant::now() + self.streaming_first_byte_timeout)
+                };
+                let semantic_deadline = (!probe_closed).then_some(probe_deadline);
+                let effective_deadline = match (first_byte_deadline, semantic_deadline) {
+                    (Some(first), Some(semantic)) => Some(first.min(semantic)),
+                    (Some(first), None) => Some(first),
+                    (None, Some(semantic)) => Some(semantic),
+                    (None, None) => None,
+                };
+                match effective_deadline {
+                    None => stream.next().await,
+                    Some(deadline) => {
+                        match tokio::time::timeout_at(deadline, stream.next()).await {
+                            Ok(value) => value,
+                            Err(_)
+                                if !probe_closed
+                                    && tokio::time::Instant::now() >= probe_deadline =>
+                            {
+                                probe_closed = true;
+                                continue;
+                            }
+                            Err(_) => {
+                                return Err(ProxyError::Timeout(format!(
+                                    "Responses stream produced no semantic output within {}s",
+                                    self.streaming_first_byte_timeout.as_secs()
+                                )));
+                            }
+                        }
+                    }
+                }
             };
 
             let Some(chunk) = next else {
@@ -2723,11 +3004,73 @@ impl RequestForwarder {
             }
 
             while let Some(block) = crate::proxy::sse::take_sse_block(&mut parse_buffer) {
-                if let Some(outcome) = inspect_responses_start_event(&block) {
-                    outcome?;
-                    let replay =
-                        futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
-                    return Ok(ProxyResponse::streamed(status, headers, replay));
+                if !probe_closed {
+                    if let Some((event_type, payload)) =
+                        super::semantic_detector::parse_sse_data(&block)
+                    {
+                        match probe.observe_event(&event_type, &payload) {
+                            ProbeDecision::Degraded => {
+                                let evidence: Vec<String> = probe
+                                    .evidence()
+                                    .iter()
+                                    .map(|sample| sample.as_str().to_string())
+                                    .collect();
+                                let request_id = probe.request_id().map(ToString::to_string);
+                                if self.semantic.replay_enabled {
+                                    log::warn!(
+                                        "[SEMA-001] Responses 语义降级: provider={}, endpoint={}, request_id={:?}, evidence={:?}, action=replay",
+                                        provider.id, endpoint, request_id, evidence,
+                                    );
+                                    return Err(ProxyError::SemanticDegraded {
+                                        evidence,
+                                        request_id,
+                                    });
+                                }
+                                log::warn!(
+                                    "[SEMA-001] Responses 语义降级(dry-run): provider={}, endpoint={}, request_id={:?}, evidence={:?}, action=observe-only",
+                                    provider.id, endpoint, request_id, evidence,
+                                );
+                                self.audit_semantic_degradation(
+                                    app_type_str,
+                                    provider,
+                                    endpoint,
+                                    request_id,
+                                    evidence,
+                                    1,
+                                    false,
+                                    SemanticOutcome::DryRun,
+                                    true,
+                                    "A",
+                                    Some("replay disabled (dry-run)".to_string()),
+                                );
+                                probe_closed = true;
+                            }
+                            ProbeDecision::Pass => probe_closed = true,
+                            ProbeDecision::Continue => {}
+                        }
+                    }
+                }
+                if !probe_closed && tokio::time::Instant::now() >= probe_deadline {
+                    probe_closed = true;
+                }
+                match inspect_responses_start_event(&block) {
+                    Some(outcome) => {
+                        outcome?;
+                        let replay =
+                            futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                        return Ok(ProxyResponse::streamed(status, headers, replay));
+                    }
+                    None if commit_on_probe_pass
+                        && probe_closed
+                        && probe.decision() == ProbeDecision::Pass =>
+                    {
+                        // Probe closed healthy on a lifecycle-only event; commit now
+                        // instead of waiting for the first productive event.
+                        let replay =
+                            futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                        return Ok(ProxyResponse::streamed(status, headers, replay));
+                    }
+                    None => {}
                 }
             }
 
@@ -2924,6 +3267,9 @@ impl RequestForwarder {
             ProxyError::TransformError(_) => ErrorCategory::Retryable,
             ProxyError::AuthError(_) => ErrorCategory::Retryable,
             ProxyError::StreamIdleTimeout(_) => ErrorCategory::Retryable,
+            // Semantic degradation is resolved inside the forwarder's own
+            // bounded replay loop; if it escapes, another provider is worth a try.
+            ProxyError::SemanticDegraded { .. } => ErrorCategory::Retryable,
             // 无可用供应商：所有供应商都试过了，无法重试
             ProxyError::NoAvailableProvider => ErrorCategory::NonRetryable,
             // 其他错误（数据库/内部错误等）：不是换供应商能解决的问题
@@ -3972,7 +4318,7 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             gemini_shadow: Arc::new(GeminiShadowStore::new()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
-            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db.clone())),
             app_handle: None,
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
@@ -3984,6 +4330,16 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
             rate_limit_retry_config: RateLimitRetryConfig::default(),
+            db,
+            semantic: SemanticProbeConfig {
+                enabled: false,
+                replay_enabled: false,
+                window_ms: 200,
+                max_attempts: 2,
+                circuit_failure_threshold: 3,
+                circuit_timeout_seconds: 60,
+            },
+            semantic_guard: Arc::new(SemanticGuard::new()),
         }
     }
 
@@ -4846,6 +5202,448 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}"
         );
         assert!(matches!(inspect_responses_start_event(delta), Some(Ok(()))));
+    }
+
+    // ===== Responses 语义探针 / 重放（Tier A）回归测试 =====
+
+    const SEM_GOOD_CREATED: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_0b90cdd71061d98f016a9bad07e29487d1ac8b3aeda7d200a2\"}}\n\n";
+    const SEM_BAD_CREATED: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_d96da2e57b58406c921d0c90486646c3\"}}\n\n";
+    const SEM_GOOD_ITEM: &str = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_03d5a775fca33580016ab1432b1f7887d1b2caba9c3d9b7f83\"}}\n\n";
+    const SEM_BAD_ITEM: &str = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_cea4809436f44b6b8fde96bbe033f447\"}}\n\n";
+
+    fn sse_chunks(blocks: &[&'static str]) -> ProxyResponse {
+        let chunks: Vec<Bytes> = blocks
+            .iter()
+            .map(|block| Bytes::from_static(block.as_bytes()))
+            .collect();
+        ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::iter(chunks.into_iter().map(Ok)),
+        )
+    }
+
+    fn semantic_forwarder(replay_enabled: bool) -> RequestForwarder {
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.semantic.enabled = true;
+        forwarder.semantic.replay_enabled = replay_enabled;
+        forwarder
+    }
+
+    fn semantic_audit_count(forwarder: &RequestForwarder) -> i64 {
+        let conn = forwarder.db.conn.lock().expect("db lock");
+        conn.query_row(
+            "SELECT COUNT(*) FROM semantic_degradation_events",
+            [],
+            |row| row.get(0),
+        )
+        .expect("audit count")
+    }
+
+    #[tokio::test]
+    async fn responses_semantic_probe_healthy_stream_passes_byte_identically() {
+        let forwarder = semantic_forwarder(true);
+        let provider = test_provider_with_type(Some("openai_responses"));
+        let response = sse_chunks(&[SEM_GOOD_CREATED, SEM_GOOD_ITEM]);
+
+        let prepared = forwarder
+            .validate_responses_stream_start(response, "codex", &provider, "/v1/responses", true)
+            .await
+            .expect("healthy stream must commit, never replay");
+
+        let bytes = prepared
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("resp_0b90cdd71061d98f016a9bad07e29487d1ac8b3aeda7d200a2"));
+        assert!(text.contains("rs_03d5a775fca33580016ab1432b1f7887d1b2caba9c3d9b7f83"));
+        assert_eq!(semantic_audit_count(&forwarder), 0);
+    }
+
+    #[tokio::test]
+    async fn responses_semantic_probe_degraded_stream_is_replayable() {
+        let forwarder = semantic_forwarder(true);
+        let provider = test_provider_with_type(Some("openai_responses"));
+        let response = sse_chunks(&[SEM_BAD_CREATED, SEM_BAD_ITEM]);
+
+        let error = match forwarder
+            .validate_responses_stream_start(response, "codex", &provider, "/v1/responses", true)
+            .await
+        {
+            Ok(_) => panic!("degraded stream must abort before any client byte"),
+            Err(error) => error,
+        };
+
+        match error {
+            ProxyError::SemanticDegraded {
+                evidence,
+                request_id,
+            } => {
+                assert_eq!(
+                    request_id.as_deref(),
+                    Some("resp_d96da2e57b58406c921d0c90486646c3")
+                );
+                assert!(evidence.contains(&"response_id_32hex".to_string()));
+                assert!(evidence.contains(&"item_id_32hex".to_string()));
+            }
+            other => panic!("expected SemanticDegraded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_semantic_probe_dry_run_passes_through_and_audits() {
+        let forwarder = semantic_forwarder(false);
+        let provider = test_provider_with_type(Some("openai_responses"));
+        let response = sse_chunks(&[SEM_BAD_CREATED, SEM_BAD_ITEM]);
+
+        let prepared = forwarder
+            .validate_responses_stream_start(response, "codex", &provider, "/v1/responses", true)
+            .await
+            .expect("dry-run must never abort the stream");
+
+        let bytes = prepared
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("resp_d96da2e57b58406c921d0c90486646c3"));
+        assert!(text.contains("rs_cea4809436f44b6b8fde96bbe033f447"));
+
+        let conn = forwarder.db.conn.lock().expect("db lock");
+        let (outcome, dry_run, evidence): (String, i64, String) = conn
+            .query_row(
+                "SELECT outcome, dry_run, evidence FROM semantic_degradation_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("dry-run must be audited");
+        assert_eq!(outcome, "dry_run");
+        assert_eq!(dry_run, 1);
+        assert!(evidence.contains("response_id_32hex"));
+    }
+
+    #[tokio::test]
+    async fn responses_semantic_probe_single_sample_is_not_replayed() {
+        let forwarder = semantic_forwarder(true);
+        let provider = test_provider_with_type(Some("openai_responses"));
+        // Suspect response id but a healthy long session-scoped item id.
+        let response = sse_chunks(&[SEM_BAD_CREATED, SEM_GOOD_ITEM]);
+
+        let prepared = forwarder
+            .validate_responses_stream_start(response, "codex", &provider, "/v1/responses", true)
+            .await
+            .expect("one suspect sample must never trigger replay");
+        let bytes = prepared
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .unwrap();
+        assert!(!bytes.is_empty());
+        assert_eq!(semantic_audit_count(&forwarder), 0);
+    }
+
+    #[test]
+    fn semantic_replay_first_send_keeps_cache_key_and_second_perturbs() {
+        use crate::proxy::semantic_guard::{
+            perturb_prompt_cache_key, plan_next_attempt, SemanticAction,
+        };
+        let mut body = json!({"prompt_cache_key":"codex-session-1","model":"gpt-5.6-sol"});
+
+        // Send #1 is the original; after degradation the first replay keeps the key.
+        assert_eq!(plan_next_attempt(1, 3), SemanticAction::RetrySame);
+        assert_eq!(body["prompt_cache_key"], json!("codex-session-1"));
+
+        // Send #2 (second replay) must break channel affinity.
+        assert_eq!(plan_next_attempt(2, 3), SemanticAction::RetryPerturbed);
+        let (_old, new) = perturb_prompt_cache_key(&mut body, 7).expect("perturbed");
+        assert_ne!(new, "codex-session-1");
+        assert!(new.starts_with("codex-session-1-sem-"));
+
+        // Default budget is two sends, so a misconfigured target cannot loop.
+        assert_eq!(plan_next_attempt(2, 2), SemanticAction::GiveUp);
+    }
+
+    #[tokio::test]
+    async fn native_responses_healthy_created_commits_without_waiting_for_output() {
+        let forwarder = semantic_forwarder(true);
+        let provider = test_provider_with_type(Some("openai_responses"));
+        // `response.created` (healthy) followed by an upstream that never emits
+        // again: a native Codex client must not be made to wait for output.
+        let stream = futures::stream::once(async {
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(SEM_GOOD_CREATED.as_bytes()))
+        })
+        .chain(futures::stream::pending());
+        let response = ProxyResponse::streamed(StatusCode::OK, HeaderMap::new(), stream);
+
+        let started = std::time::Instant::now();
+        let committed = forwarder
+            .validate_responses_stream_start(response, "codex", &provider, "/v1/responses", true)
+            .await;
+        assert!(committed.is_ok(), "healthy created must commit immediately");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "probe must not add a long tail to native Codex streams"
+        );
+    }
+
+    // ----- fake upstream: full replay-loop scenarios (real HTTP, no network) -----
+
+    async fn spawn_router(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake upstream");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn codex_provider_at(base_url: String) -> Provider {
+        let mut provider = test_provider_with_type(Some("codex"));
+        provider.id = "fake-codex".to_string();
+        provider.name = "Fake Codex".to_string();
+        provider.settings_config = json!({
+            "base_url": base_url,
+            "api_key": "test-key",
+            "apiFormat": "openai_responses"
+        });
+        provider
+    }
+
+    fn codex_responses_body() -> Value {
+        json!({
+            "model": "gpt-5.6-sol",
+            "stream": true,
+            "store": false,
+            "prompt_cache_key": "codex-session-abc",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}]
+            }],
+            "tools": [{
+                "type": "function",
+                "name": "exec",
+                "description": "run a command",
+                "parameters": {"type": "object", "properties": {}}
+            }],
+            "tool_choice": "auto"
+        })
+    }
+
+    #[tokio::test]
+    async fn semantic_replay_recovers_on_second_send_and_keeps_cache_key() {
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let app = {
+            let counter = counter.clone();
+            let bodies = bodies.clone();
+            axum::Router::new().fallback(move |body: String| {
+                let counter = counter.clone();
+                let bodies = bodies.clone();
+                async move {
+                    bodies.lock().expect("bodies lock").push(body);
+                    let index = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let payload = if index == 0 {
+                        format!("{SEM_BAD_CREATED}{SEM_BAD_ITEM}")
+                    } else {
+                        format!("{SEM_GOOD_CREATED}{SEM_GOOD_ITEM}")
+                    };
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        payload,
+                    )
+                }
+            })
+        };
+        let base_url = spawn_router(app).await;
+
+        let mut forwarder = semantic_forwarder(true);
+        forwarder.semantic.max_attempts = 2;
+
+        let result = forwarder
+            .forward_with_retry_inner(
+                &AppType::Codex,
+                http::Method::POST,
+                "/v1/responses",
+                codex_responses_body(),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![codex_provider_at(base_url)],
+            )
+            .await;
+
+        let forwarded = match result {
+            Ok(forwarded) => forwarded,
+            Err(error) => panic!("replay should recover, got {:?}", error.error),
+        };
+        let bytes = forwarded
+            .response
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("resp_0b90cdd71061d98f016a9bad07e29487d1ac8b3aeda7d200a2"));
+
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let bodies = bodies.lock().unwrap();
+        assert!(bodies[0].contains("\"prompt_cache_key\":\"codex-session-abc\""));
+        assert!(
+            bodies[1].contains("\"prompt_cache_key\":\"codex-session-abc\""),
+            "first replay must preserve the upstream cache key"
+        );
+        assert!(!bodies[1].contains("-sem-"));
+    }
+
+    #[tokio::test]
+    async fn semantic_replay_gives_up_after_budget_and_marks_degraded() {
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let app = {
+            let counter = counter.clone();
+            let bodies = bodies.clone();
+            axum::Router::new().fallback(move |body: String| {
+                let counter = counter.clone();
+                let bodies = bodies.clone();
+                async move {
+                    bodies.lock().expect("bodies lock").push(body);
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        format!("{SEM_BAD_CREATED}{SEM_BAD_ITEM}"),
+                    )
+                }
+            })
+        };
+        let base_url = spawn_router(app).await;
+
+        let mut forwarder = semantic_forwarder(true);
+        forwarder.semantic.max_attempts = 2;
+
+        let error = match forwarder
+            .forward_with_retry_inner(
+                &AppType::Codex,
+                http::Method::POST,
+                "/v1/responses",
+                codex_responses_body(),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![codex_provider_at(base_url)],
+            )
+            .await
+        {
+            Ok(_) => panic!("degraded upstream must not be reported as success"),
+            Err(error) => error.error,
+        };
+        assert!(matches!(error, ProxyError::SemanticDegraded { .. }));
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let conn = forwarder.db.conn.lock().expect("db lock");
+        let (outcome, attempts, replayed): (String, i64, i64) = conn
+            .query_row(
+                "SELECT outcome, attempts, replayed FROM semantic_degradation_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("exhaustion must be audited");
+        assert_eq!(outcome, "exhausted");
+        assert_eq!(attempts, 2);
+        assert_eq!(replayed, 1);
+    }
+
+    #[tokio::test]
+    async fn semantic_replay_third_send_perturbs_cache_key() {
+        // Degraded, degraded, healthy → the optional second replay must perturb.
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let app = {
+            let counter = counter.clone();
+            let bodies = bodies.clone();
+            axum::Router::new().fallback(move |body: String| {
+                let counter = counter.clone();
+                let bodies = bodies.clone();
+                async move {
+                    bodies.lock().expect("bodies lock").push(body);
+                    let index = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let payload = if index < 2 {
+                        format!("{SEM_BAD_CREATED}{SEM_BAD_ITEM}")
+                    } else {
+                        format!("{SEM_GOOD_CREATED}{SEM_GOOD_ITEM}")
+                    };
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        payload,
+                    )
+                }
+            })
+        };
+        let base_url = spawn_router(app).await;
+
+        let mut forwarder = semantic_forwarder(true);
+        forwarder.semantic.max_attempts = 3;
+        let result = forwarder
+            .forward_with_retry_inner(
+                &AppType::Codex,
+                http::Method::POST,
+                "/v1/responses",
+                codex_responses_body(),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![codex_provider_at(base_url)],
+            )
+            .await;
+
+        let forwarded = match result {
+            Ok(forwarded) => forwarded,
+            Err(error) => panic!("third send should recover, got {:?}", error.error),
+        };
+        forwarded
+            .response
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .unwrap();
+
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let bodies = bodies.lock().unwrap();
+        assert!(!bodies[1].contains("-sem-"), "first replay keeps affinity");
+        assert!(
+            bodies[2].contains("-sem-"),
+            "second replay must break channel affinity: {}",
+            bodies[2]
+        );
+    }
+
+    #[test]
+    fn semantic_audit_event_round_trips_through_database() {
+        use crate::database::dao::semantic_audit::SemanticDegradationEvent;
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.insert_semantic_degradation_event(&SemanticDegradationEvent {
+            request_id: Some("resp_d96da2e57b58406c921d0c90486646c3".to_string()),
+            app_type: "codex".to_string(),
+            provider_id: "hejuapi".to_string(),
+            endpoint: Some("/v1/responses".to_string()),
+            tier: "A".to_string(),
+            evidence: vec!["response_id_32hex".to_string(), "item_id_32hex".to_string()],
+            attempts: 2,
+            replayed: false,
+            outcome: "exhausted".to_string(),
+            dry_run: false,
+            detail: Some("semantic_circuit_opened=true".to_string()),
+        })
+        .expect("audit insert");
+
+        let conn = db.conn.lock().expect("db lock");
+        let (outcome, evidence, attempts): (String, String, i64) = conn
+            .query_row(
+                "SELECT outcome, evidence, attempts FROM semantic_degradation_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(outcome, "exhausted");
+        assert_eq!(attempts, 2);
+        assert!(evidence.contains("item_id_32hex"));
     }
 
     #[test]

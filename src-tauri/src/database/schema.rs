@@ -138,6 +138,12 @@ impl Database {
             rate_limit_max_wait_seconds INTEGER NOT NULL DEFAULT 60,
             rate_limit_total_wait_seconds INTEGER NOT NULL DEFAULT 60,
             rate_limit_respect_retry_after INTEGER NOT NULL DEFAULT 1,
+            semantic_probe_enabled INTEGER NOT NULL DEFAULT 1,
+            semantic_replay_enabled INTEGER NOT NULL DEFAULT 0,
+            semantic_probe_window_ms INTEGER NOT NULL DEFAULT 200,
+            semantic_replay_max_attempts INTEGER NOT NULL DEFAULT 2,
+            semantic_circuit_failure_threshold INTEGER NOT NULL DEFAULT 3,
+            semantic_circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60,
             default_cost_multiplier TEXT NOT NULL DEFAULT '1',
             pricing_model_source TEXT NOT NULL DEFAULT 'response',
             created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -235,6 +241,33 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_request_logs_usage_indexes_if_supported(conn)?;
+
+        // 10b. Responses 语义降级审计表（Tier A 检出 + Tier B 信号）
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS semantic_degradation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                request_id TEXT,
+                app_type TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                endpoint TEXT,
+                tier TEXT NOT NULL,
+                evidence TEXT NOT NULL DEFAULT '',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                replayed INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT NOT NULL,
+                dry_run INTEGER NOT NULL DEFAULT 0,
+                detail TEXT
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建语义降级审计表失败: {e}")))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_semantic_degradation_created_at
+             ON semantic_degradation_events(created_at)",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建语义降级审计索引失败: {e}")))?;
 
         // 11. Model Pricing 表
         conn.execute(
@@ -563,6 +596,11 @@ impl Database {
                         log::info!("迁移数据库从 v19 到 v20（429 累计等待预算）");
                         Self::migrate_v19_to_v20(conn)?;
                         Self::set_user_version(conn, 20)?;
+                    }
+                    20 => {
+                        log::info!("迁移数据库从 v20 到 v21（Responses 语义探针配置）");
+                        Self::migrate_v20_to_v21(conn)?;
+                        Self::set_user_version(conn, 21)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1672,6 +1710,75 @@ impl Database {
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         }
+        Ok(())
+    }
+
+    /// v20 -> v21: independent semantic health probe/replay configuration.
+    fn migrate_v20_to_v21(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_config")? {
+            Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "semantic_probe_enabled",
+                "INTEGER NOT NULL DEFAULT 1",
+            )?;
+            Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "semantic_replay_enabled",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "semantic_probe_window_ms",
+                "INTEGER NOT NULL DEFAULT 200",
+            )?;
+            Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "semantic_replay_max_attempts",
+                "INTEGER NOT NULL DEFAULT 2",
+            )?;
+            Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "semantic_circuit_failure_threshold",
+                "INTEGER NOT NULL DEFAULT 3",
+            )?;
+            Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "semantic_circuit_timeout_seconds",
+                "INTEGER NOT NULL DEFAULT 60",
+            )?;
+        }
+        // Audit table for the semantic probe (Tier A detections + Tier B signals).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS semantic_degradation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                request_id TEXT,
+                app_type TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                endpoint TEXT,
+                tier TEXT NOT NULL,
+                evidence TEXT NOT NULL DEFAULT '',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                replayed INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT NOT NULL,
+                dry_run INTEGER NOT NULL DEFAULT 0,
+                detail TEXT
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建语义降级审计表失败: {e}")))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_semantic_degradation_created_at
+             ON semantic_degradation_events(created_at)",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建语义降级审计索引失败: {e}")))?;
         Ok(())
     }
 

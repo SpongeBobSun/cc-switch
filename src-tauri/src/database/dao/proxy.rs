@@ -226,7 +226,10 @@ impl Database {
                         circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                         circuit_error_rate_threshold, circuit_min_requests,
                         retry_on_rate_limit, rate_limit_max_retries, rate_limit_max_wait_seconds,
-                        rate_limit_total_wait_seconds, rate_limit_respect_retry_after
+                        rate_limit_total_wait_seconds, rate_limit_respect_retry_after,
+                        semantic_probe_enabled, semantic_replay_enabled, semantic_probe_window_ms,
+                        semantic_replay_max_attempts, semantic_circuit_failure_threshold,
+                        semantic_circuit_timeout_seconds
                  FROM proxy_config WHERE app_type = ?1",
                 [app_type],
                 |row| {
@@ -248,6 +251,12 @@ impl Database {
                         rate_limit_max_wait_seconds: row.get::<_, i32>(14)? as u32,
                         rate_limit_total_wait_seconds: row.get::<_, i32>(15)? as u32,
                         rate_limit_respect_retry_after: row.get::<_, i32>(16)? != 0,
+                        semantic_probe_enabled: row.get::<_, i32>(17)? != 0,
+                        semantic_replay_enabled: row.get::<_, i32>(18)? != 0,
+                        semantic_probe_window_ms: row.get::<_, i32>(19)? as u32,
+                        semantic_replay_max_attempts: row.get::<_, i32>(20)? as u32,
+                        semantic_circuit_failure_threshold: row.get::<_, i32>(21)? as u32,
+                        semantic_circuit_timeout_seconds: row.get::<_, i32>(22)? as u32,
                     })
                 },
             )
@@ -277,6 +286,12 @@ impl Database {
                     rate_limit_max_wait_seconds: 60,
                     rate_limit_total_wait_seconds: 60,
                     rate_limit_respect_retry_after: true,
+                    semantic_probe_enabled: true,
+                    semantic_replay_enabled: false,
+                    semantic_probe_window_ms: 200,
+                    semantic_replay_max_attempts: 2,
+                    semantic_circuit_failure_threshold: 3,
+                    semantic_circuit_timeout_seconds: 60,
                 })
             }
             Err(e) => Err(AppError::Database(e.to_string())),
@@ -308,6 +323,12 @@ impl Database {
                 rate_limit_max_wait_seconds = ?15,
                 rate_limit_total_wait_seconds = ?16,
                 rate_limit_respect_retry_after = ?17,
+                semantic_probe_enabled = ?18,
+                semantic_replay_enabled = ?19,
+                semantic_probe_window_ms = ?20,
+                semantic_replay_max_attempts = ?21,
+                semantic_circuit_failure_threshold = ?22,
+                semantic_circuit_timeout_seconds = ?23,
                 updated_at = datetime('now')
              WHERE app_type = ?1",
             rusqlite::params![
@@ -332,6 +353,12 @@ impl Database {
                 } else {
                     0
                 },
+                if config.semantic_probe_enabled { 1 } else { 0 },
+                if config.semantic_replay_enabled { 1 } else { 0 },
+                config.semantic_probe_window_ms.min(200) as i32,
+                config.semantic_replay_max_attempts.clamp(1, 3) as i32,
+                config.semantic_circuit_failure_threshold.max(1) as i32,
+                config.semantic_circuit_timeout_seconds.max(1) as i32,
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;

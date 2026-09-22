@@ -252,6 +252,19 @@ impl RequestContext {
                 total_wait_seconds: self.app_config.rate_limit_total_wait_seconds,
                 respect_retry_after: self.app_config.rate_limit_respect_retry_after,
             },
+            state.db.clone(),
+            crate::proxy::types::SemanticProbeConfig {
+                enabled: self.app_config.semantic_probe_enabled,
+                // Replay is a *modifier* on top of the probe: without detection
+                // there is nothing safe to replay.
+                replay_enabled: self.app_config.semantic_probe_enabled
+                    && self.app_config.semantic_replay_enabled,
+                window_ms: self.app_config.semantic_probe_window_ms,
+                max_attempts: self.app_config.semantic_replay_max_attempts,
+                circuit_failure_threshold: self.app_config.semantic_circuit_failure_threshold,
+                circuit_timeout_seconds: self.app_config.semantic_circuit_timeout_seconds,
+            },
+            state.semantic_guard.clone(),
         )
     }
 

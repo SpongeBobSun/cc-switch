@@ -194,6 +194,83 @@ pub struct AppProxyConfig {
     pub rate_limit_total_wait_seconds: u32,
     /// 是否优先遵守上游的 Retry-After 响应头
     pub rate_limit_respect_retry_after: bool,
+    /// Semantic Responses probe. Defaults to enabled in dry-run mode.
+    #[serde(default = "default_true")]
+    pub semantic_probe_enabled: bool,
+    /// Allow semantic replay after a Tier A degradation. Defaults to false.
+    #[serde(default)]
+    pub semantic_replay_enabled: bool,
+    /// Maximum Tier A buffering window in milliseconds (capped at 200).
+    #[serde(default = "default_semantic_probe_window_ms")]
+    pub semantic_probe_window_ms: u32,
+    /// Total semantic sends for one client request, including the original.
+    /// Default 2 = one cache-preserving replay. 3 enables the perturbed replay.
+    #[serde(default = "default_semantic_replay_max_attempts")]
+    pub semantic_replay_max_attempts: u32,
+    /// Independent semantic failure threshold within the rolling window.
+    #[serde(default = "default_semantic_circuit_failure_threshold")]
+    pub semantic_circuit_failure_threshold: u32,
+    /// Independent semantic circuit cooldown in seconds.
+    #[serde(default = "default_semantic_circuit_timeout_seconds")]
+    pub semantic_circuit_timeout_seconds: u32,
+}
+
+fn default_semantic_probe_window_ms() -> u32 {
+    200
+}
+
+fn default_semantic_replay_max_attempts() -> u32 {
+    2
+}
+
+fn default_semantic_circuit_failure_threshold() -> u32 {
+    3
+}
+
+fn default_semantic_circuit_timeout_seconds() -> u32 {
+    60
+}
+
+/// Responses 语义探针配置（独立于传输层重试/熔断）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticProbeConfig {
+    /// Master switch for Tier A detection. Defaults to on.
+    pub enabled: bool,
+    /// Whether a detected Tier A degradation may abort + replay. Off = dry-run.
+    pub replay_enabled: bool,
+    /// Buffering window in milliseconds (capped at 200 by the detector).
+    pub window_ms: u32,
+    /// Total sends per client request (1..=3).
+    pub max_attempts: u32,
+    /// Semantic failures inside the 5-minute window that trip the cooldown.
+    pub circuit_failure_threshold: u32,
+    /// Semantic circuit cooldown in seconds.
+    pub circuit_timeout_seconds: u32,
+}
+
+impl Default for SemanticProbeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            replay_enabled: false,
+            window_ms: 200,
+            max_attempts: 2,
+            circuit_failure_threshold: 3,
+            circuit_timeout_seconds: 60,
+        }
+    }
+}
+
+impl SemanticProbeConfig {
+    /// Buffering window, hard-capped by the detector.
+    pub fn window(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.window_ms.min(200) as u64)
+    }
+
+    /// Total sends per client request, clamped to the supported 1..=3 range.
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts.clamp(1, 3)
+    }
 }
 
 /// 单个 Provider 的 HTTP 429 重试策略。

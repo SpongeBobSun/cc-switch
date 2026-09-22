@@ -217,6 +217,14 @@ export function AutoFailoverConfigPanel({
         rateLimitMaxWaitSeconds: raw.rateLimitMaxWaitSeconds,
         rateLimitTotalWaitSeconds: raw.rateLimitTotalWaitSeconds,
         rateLimitRespectRetryAfter: formData.rateLimitRespectRetryAfter,
+        // Preserve the semantic probe fields on save. The proxy reads these per
+        // request; omitting them here would silently reset them to defaults.
+        semanticProbeEnabled: config.semanticProbeEnabled,
+        semanticReplayEnabled: config.semanticReplayEnabled,
+        semanticProbeWindowMs: config.semanticProbeWindowMs,
+        semanticReplayMaxAttempts: config.semanticReplayMaxAttempts,
+        semanticCircuitFailureThreshold: config.semanticCircuitFailureThreshold,
+        semanticCircuitTimeoutSeconds: config.semanticCircuitTimeoutSeconds,
       });
       toast.success(
         t("proxy.autoFailover.configSaved", "自动故障转移配置已保存"),

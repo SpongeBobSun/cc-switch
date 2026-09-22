@@ -24,7 +24,13 @@ pub mod model_mapper;
 pub mod provider_router;
 pub mod providers;
 pub mod response_processor;
+// Tier B analysis and the standalone `probe_sse` adapter are exercised by the
+// in-module tests and reserved for audit wiring; allow dead_code so the public
+// API stays available without polluting the production build with warnings.
+#[allow(dead_code)]
+pub(crate) mod semantic_detector;
 pub(crate) mod semantic_error;
+pub(crate) mod semantic_guard;
 pub(crate) mod server;
 pub mod session;
 pub(crate) mod sse;

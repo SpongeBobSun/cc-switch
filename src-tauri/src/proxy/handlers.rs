@@ -2027,6 +2027,7 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         ProxyError::RateLimited { .. } => "cc_switch_upstream_rate_limited",
         ProxyError::DatabaseError(_) => "cc_switch_database_error",
         ProxyError::Internal(_) => "cc_switch_internal_error",
+        ProxyError::SemanticDegraded { .. } => "cc_switch_semantic_degraded",
         ProxyError::AlreadyRunning
         | ProxyError::NotRunning
         | ProxyError::BindFailed(_)

@@ -143,4 +143,13 @@ export interface AppProxyConfig {
   rateLimitMaxWaitSeconds: number;
   rateLimitTotalWaitSeconds: number;
   rateLimitRespectRetryAfter: boolean;
+  // Responses 语义降级探针（独立于传输层熔断）
+  semanticProbeEnabled: boolean;
+  // false = dry-run：只检测/记录，不中止、不重放
+  semanticReplayEnabled: boolean;
+  semanticProbeWindowMs: number;
+  // 单客户端请求的总发送次数（1-3，含原始请求）
+  semanticReplayMaxAttempts: number;
+  semanticCircuitFailureThreshold: number;
+  semanticCircuitTimeoutSeconds: number;
 }

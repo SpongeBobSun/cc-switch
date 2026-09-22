@@ -48,6 +48,8 @@ pub struct ProxyState {
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
+    /// 独立的 Responses 语义健康熔断器（与传输层熔断器完全分离）
+    pub semantic_guard: Arc<super::semantic_guard::SemanticGuard>,
 }
 
 /// 代理HTTP服务器
@@ -81,6 +83,7 @@ impl ProxyServer {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle,
             failover_manager,
+            semantic_guard: Arc::new(super::semantic_guard::SemanticGuard::new()),
         };
 
         Self {

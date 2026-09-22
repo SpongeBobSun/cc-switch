@@ -85,6 +85,15 @@ pub enum ProxyError {
     #[allow(dead_code)]
     #[error("内部错误: {0}")]
     Internal(String),
+
+    /// HTTP 200 Responses stream routed to a channel that does not implement
+    /// the Responses tool protocol (Tier A identifier fingerprint). Replayable
+    /// because it is raised before any client byte is written.
+    #[error("上游语义降级 (Responses 工具协议不可用): {evidence:?}")]
+    SemanticDegraded {
+        evidence: Vec<String>,
+        request_id: Option<String>,
+    },
 }
 
 impl IntoResponse for ProxyError {
@@ -141,6 +150,9 @@ impl IntoResponse for ProxyError {
                     ProxyError::AuthError(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
                     ProxyError::Internal(_) => {
                         (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+                    }
+                    ProxyError::SemanticDegraded { .. } => {
+                        (StatusCode::BAD_GATEWAY, self.to_string())
                     }
                     ProxyError::ResponseBodyTooLarge(_) => {
                         (StatusCode::BAD_GATEWAY, self.to_string())
